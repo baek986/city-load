@@ -16,6 +16,15 @@ from app.domain.models import TravelArc
 BLOCK_M = 400
 LOCAL_SPEED_MPS = 8
 ARTERIAL_SPEED_MPS = 14
+# Local streets cannot cross i = 2 except at j = 0. Depot at the origin sits on
+# the west bank; stores with i >= RIVER_I must use the bridge.
+RIVER_I = 2
+
+
+def bank_of(x_m: float) -> str:
+    """'west' is the depot side of the river; 'east' must cross the bridge."""
+    i = int(round(x_m / BLOCK_M))
+    return "west" if i < RIVER_I else "east"
 
 
 @dataclass(frozen=True)

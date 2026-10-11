@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from itertools import combinations
+from itertools import combinations, permutations, product
 
 from app.domain.errors import CargoExceedsVehicleError, MissingTravelArcError
 from app.domain.matrix import TravelMatrix
@@ -19,8 +19,10 @@ from app.domain.models import (
     Weights,
 )
 from app.domain.units import assert_units_fit_fleet, build_units, group_units_by_store, make_node
+from app.optimizer.adaptive import adaptive_improve
+from app.optimizer.initial_agent import propose_initial
 from app.optimizer.instructions import build_instructions
-from app.optimizer.master import ArcCut, SetCut, sequence_arcs, solve_master
+from app.optimizer.master import ArcCut, AssignmentCut, SetCut, sequence_arcs, solve_master
 from app.optimizer.packing import (
     can_pack_nodes,
     clear_pack_cache,
@@ -30,7 +32,12 @@ from app.optimizer.packing import (
     stops_from_nodes,
 )
 from app.optimizer.routing import cheapest_insertion, clarke_wright, materialize_routes
-from app.optimizer.scoring import build_scales, on_time_rate, score_routes, split_order_count
+from app.optimizer.scoring import build_scales, fast_lower_bound, on_time_rate, score_routes, split_order_count
+from app.optimizer.shape import banks_for, shapes_from_nodes
+
+# CP-SAT scores are integers / 1e6; packed scores are floats. Treat a bound
+# this close to the incumbent as closed, so scale rounding cannot reopen a gap.
+BOUND_TOL = 1e-5
 
 
 def _failed(
@@ -114,6 +121,97 @@ def _repair(
     return None
 
 
+def _bridge_groups(nodes: list[CustomerNode], dataset: Dataset) -> tuple[list[CustomerNode], list[CustomerNode]] | None:
+    """Split a large road-network day across the river. Small Euclidean cases stay intact."""
+    if len(nodes) <= 12:
+        return None
+    banks = banks_for(nodes, dataset)
+    west = [node for node in nodes if banks.get(node.node_id) == "west"]
+    east = [node for node in nodes if banks.get(node.node_id) == "east"]
+    if len(west) < 3 or len(east) < 3:
+        return None
+    return west, east
+
+
+def _allocate_bank_vehicles(
+    dataset: Dataset,
+    west: list[CustomerNode],
+    east: list[CustomerNode],
+) -> tuple[set[str], set[str]]:
+    vehicles = sorted(dataset.vehicles, key=lambda vehicle: (-vehicle.volume_mm3, -vehicle.max_weight_g, vehicle.id))
+    west_need = (sum(node.volume_mm3 for node in west), sum(node.weight_g for node in west))
+    east_need = (sum(node.volume_mm3 for node in east), sum(node.weight_g for node in east))
+    heavier_east = east_need >= west_need
+    heavier_need = east_need if heavier_east else west_need
+    heavier_ids: set[str] = set()
+    volume = weight = 0
+    for vehicle in vehicles:
+        if len(heavier_ids) >= len(vehicles) - 1:
+            break
+        if heavier_ids and volume >= heavier_need[0] and weight >= heavier_need[1]:
+            break
+        heavier_ids.add(vehicle.id)
+        volume += vehicle.volume_mm3
+        weight += vehicle.max_weight_g
+    if not heavier_ids:
+        heavier_ids.add(vehicles[0].id)
+    lighter_ids = {vehicle.id for vehicle in dataset.vehicles if vehicle.id not in heavier_ids}
+    if not lighter_ids:
+        smallest = min(
+            (vehicle for vehicle in dataset.vehicles if vehicle.id in heavier_ids),
+            key=lambda vehicle: (vehicle.volume_mm3, vehicle.id),
+        )
+        heavier_ids.remove(smallest.id)
+        lighter_ids.add(smallest.id)
+    if heavier_east:
+        return lighter_ids, heavier_ids
+    return heavier_ids, lighter_ids
+
+
+def _construct_subset(
+    nodes: list[CustomerNode],
+    dataset: Dataset,
+    matrix: TravelMatrix,
+    shapes,
+    banks,
+    vehicle_ids: set[str],
+) -> dict[str, list[CustomerNode]] | None:
+    inserted = cheapest_insertion(nodes, dataset, matrix, shapes=shapes, banks=banks, vehicle_ids=vehicle_ids)
+    if inserted is not None:
+        return inserted
+    return clarke_wright(nodes, dataset, matrix, shapes=shapes, banks=banks, vehicle_ids=vehicle_ids)
+
+
+def _bridge_seed(
+    nodes: list[CustomerNode],
+    dataset: Dataset,
+    matrix: TravelMatrix,
+    shapes,
+    banks,
+) -> dict[str, list[CustomerNode]] | None:
+    groups = _bridge_groups(nodes, dataset)
+    if groups is None:
+        return None
+    west, east = groups
+    west_ids, east_ids = _allocate_bank_vehicles(dataset, west, east)
+    west_assignment = _construct_subset(west, dataset, matrix, shapes, banks, west_ids)
+    east_assignment = _construct_subset(east, dataset, matrix, shapes, banks, east_ids)
+    if west_assignment is None or east_assignment is None:
+        return None
+    merged = {vehicle.id: [] for vehicle in dataset.vehicles}
+    for assignment in (west_assignment, east_assignment):
+        for vehicle_id, sequence in assignment.items():
+            if not sequence:
+                continue
+            if merged[vehicle_id]:
+                return None
+            merged[vehicle_id] = sequence
+    covered = {node.node_id for sequence in merged.values() for node in sequence}
+    if covered != {node.node_id for node in nodes}:
+        return None
+    return merged
+
+
 def _best_construction(
     nodes: list[CustomerNode],
     dataset: Dataset,
@@ -122,13 +220,18 @@ def _best_construction(
     weights: Weights,
     scales,
 ) -> dict[str, list[CustomerNode]] | None:
+    shapes = shapes_from_nodes(nodes, units_by_id)
+    banks = banks_for(nodes, dataset) if len(nodes) > 12 else None
     candidates = []
-    inserted = cheapest_insertion(nodes, dataset, matrix)
+    inserted = cheapest_insertion(nodes, dataset, matrix, shapes=shapes, banks=banks)
     if inserted is not None:
         candidates.append(inserted)
-    saved = clarke_wright(nodes, dataset, matrix)
+    saved = clarke_wright(nodes, dataset, matrix, shapes=shapes, banks=banks)
     if saved is not None:
         candidates.append(saved)
+    split = _bridge_seed(nodes, dataset, matrix, shapes, banks)
+    if split is not None:
+        candidates.append(split)
     best_assignment = None
     best_score = None
     for candidate in candidates:
@@ -146,26 +249,146 @@ def _best_construction(
     return best_assignment
 
 
+def _infeasible_vehicle_ids(
+    subset: list[CustomerNode],
+    groups: dict[tuple, list[Vehicle]],
+    rule,
+    units_by_id: dict[str, PackingUnit],
+    skip: set[str] | None = None,
+) -> list[str]:
+    """Vehicle ids whose cargo bay cannot hold this subset.
+
+    Weight and volume overflows are left to the master. skip is a set of
+    vehicle ids already forbidden by a subset cut (a pair inside a triple).
+    """
+    blocked: list[str] = []
+    skipped = skip or set()
+    weight = sum(node.weight_g for node in subset)
+    volume = sum(node.volume_mm3 for node in subset)
+    for group in groups.values():
+        representative = group[0]
+        if all(vehicle.id in skipped for vehicle in group):
+            continue
+        if weight > representative.max_weight_g or volume > representative.volume_mm3:
+            continue
+        if not can_pack_nodes(subset, representative, rule, units_by_id):
+            blocked.extend(vehicle.id for vehicle in group if vehicle.id not in skipped)
+    return blocked
+
+
 def _pair_cuts(
     nodes: list[CustomerNode],
     vehicles: list[Vehicle],
     dataset: Dataset,
     units_by_id: dict[str, PackingUnit],
+    budget_s: float | None = None,
 ) -> list[SetCut]:
-    if len(nodes) > 10:
-        return []
+    """Forbid stop pairs and triples that cannot share a vehicle.
+
+    Runs at any problem size. Identical vehicles share one packing check, subsets
+    that already violate weight or volume are left to the master's capacity
+    constraints, and a time budget keeps very large instances cheap. Pairs run
+    first; leftover budget is spent on triples that are not implied by a pair
+    cut. The budget has a wide margin so same-seed runs stay deterministic.
+    """
+    if budget_s is None:
+        budget_s = 10.0 if len(nodes) <= 12 else 5.0
+    deadline = time.monotonic() + budget_s
+    groups: dict[tuple, list[Vehicle]] = {}
+    for vehicle in vehicles:
+        signature = (vehicle.length_mm, vehicle.width_mm, vehicle.height_mm, vehicle.max_weight_g)
+        groups.setdefault(signature, []).append(vehicle)
     cuts: list[SetCut] = []
     rule = dataset.loading_rule
     for left, right in combinations(nodes, 2):
-        blocked = [
-            vehicle.id
-            for vehicle in vehicles
-            if not can_pack_nodes([left, right], vehicle, rule, units_by_id)
-        ]
+        if time.monotonic() > deadline:
+            break
+        blocked = _infeasible_vehicle_ids([left, right], groups, rule, units_by_id)
         if not blocked:
             continue
         vehicle_ids = None if len(blocked) == len(vehicles) else frozenset(blocked)
         cuts.append(SetCut(frozenset({left.node_id, right.node_id}), vehicle_ids))
+    pair_index: dict[frozenset[str], frozenset[str] | None] = {
+        cut.node_ids: cut.vehicle_ids for cut in cuts if len(cut.node_ids) == 2
+    }
+    if len(nodes) >= 3:
+        for first, second, third in combinations(nodes, 3):
+            if time.monotonic() > deadline:
+                break
+            subset = [first, second, third]
+            skipped: set[str] = set()
+            implied = False
+            for left, right in combinations(subset, 2):
+                key = frozenset({left.node_id, right.node_id})
+                if key not in pair_index:
+                    continue
+                vids = pair_index[key]
+                if vids is None:
+                    implied = True
+                    break
+                skipped.update(vids)
+            if implied or len(skipped) == len(vehicles):
+                continue
+            blocked = _infeasible_vehicle_ids(subset, groups, rule, units_by_id, skipped)
+            if not blocked:
+                continue
+            vehicle_ids = None if len(blocked) + len(skipped) == len(vehicles) else frozenset(blocked)
+            cuts.append(SetCut(frozenset({first.node_id, second.node_id, third.node_id}), vehicle_ids))
+    return cuts
+
+
+def _vehicle_signature(vehicle: Vehicle) -> tuple:
+    return (
+        vehicle.type_name,
+        vehicle.length_mm,
+        vehicle.width_mm,
+        vehicle.height_mm,
+        vehicle.max_weight_g,
+        vehicle.cost_per_km,
+        vehicle.fixed_cost,
+    )
+
+
+def _partition_key(assignment: dict[str, list[CustomerNode]], dataset: Dataset) -> tuple:
+    """Vehicle-identity-free key for a node partition, used to spot repeats."""
+    signature_of = {vehicle.id: _vehicle_signature(vehicle) for vehicle in dataset.vehicles}
+    entries = [
+        (signature_of[vehicle_id], tuple(sorted(node.node_id for node in nodes)))
+        for vehicle_id, nodes in assignment.items()
+        if nodes
+    ]
+    return tuple(sorted(entries))
+
+
+def _assignment_exclusions(
+    assignment: dict[str, list[CustomerNode]],
+    dataset: Dataset,
+    cap: int = 256,
+) -> list[AssignmentCut]:
+    """Forbid this exact partition, including permutations over identical vehicles."""
+    groups: dict[tuple, list[str]] = {}
+    for vehicle in dataset.vehicles:
+        groups.setdefault(_vehicle_signature(vehicle), []).append(vehicle.id)
+    served = {vehicle_id: tuple(node.node_id for node in nodes) for vehicle_id, nodes in assignment.items() if nodes}
+    group_ids: list[list[str]] = []
+    group_variants: list[list[tuple[tuple[str, ...], ...]]] = []
+    for ids in groups.values():
+        sets = [served[vehicle_id] for vehicle_id in ids if vehicle_id in served]
+        if not sets:
+            continue
+        padded = sets + [()] * (len(ids) - len(sets))
+        variants = sorted(set(permutations(padded)))
+        group_ids.append(ids)
+        group_variants.append(variants)
+    cuts: list[AssignmentCut] = []
+    for combo in product(*group_variants):
+        pairs: list[tuple[str, str]] = []
+        for ids, variant in zip(group_ids, combo):
+            for vehicle_id, node_ids in zip(ids, variant):
+                pairs.extend((vehicle_id, node_id) for node_id in node_ids)
+        cuts.append(AssignmentCut(tuple(pairs)))
+        if len(cuts) >= cap:
+            break
     return cuts
 
 
@@ -286,6 +509,7 @@ def _finish(
         lower_bound=lower_bound,
         upper_bound=upper,
         gap=gap,
+        bound_established=bool(proven or (lower_bound is not None and lower_bound > 1e-6)),
         score=upper,
         split_order_count=split_count,
         on_time_rate=on_time_rate(routes),
@@ -305,11 +529,24 @@ def solve_joint(
     seed: int = 1,
     time_limit_s: float = 180.0,
     fixed_nodes: dict[str, str] | None = None,
+    prove_optimal: bool = False,
+    search_workers: int = 1,
 ) -> JointResult:
     """Solve the joint problem.
 
     locked_vehicles maps node_id to vehicle_id for orders that must stay put.
     The caller resolves order locks into node locks before calling.
+
+    prove_optimal spends the budget on closing the gap: more master rounds,
+    longer slices once the packing cuts stabilize, and enumeration of route
+    optima until the master bound reaches the packed incumbent. The default
+    large-instance path keeps short master slices and stops after two rounds
+    that do not improve the packed score, so leftover time is not spent only
+    on the bound. search_workers above one speeds up CP-SAT but gives up
+    same-seed reproducibility. Packing feasibility verdicts come from the
+    constructive packer, so a proven gap of zero is exact up to packings that
+    packer cannot find. Extra stacking implied by floor area and cargo height
+    is in the master. Small instances use circuit constraints from the first round.
     """
     weights = weights or Weights()
     clear_pack_cache()
@@ -335,12 +572,16 @@ def solve_joint(
     node_by_id = {node.node_id: node for node in nodes}
     set_cuts = _pair_cuts(nodes, dataset.vehicles, dataset, units_by_id)
     arc_cuts: list[ArcCut] = []
+    assignment_cuts: list[AssignmentCut] = []
+    excluded_partitions: set[tuple] = set()
     best_routes: list[RoutePlan] | None = None
     best_placements: list[Placement] | None = None
     best_score: float | None = None
-    lower_bound: float | None = None
+    lower_bound = fast_lower_bound(nodes, dataset, matrix, weights, scales, units_by_id)
+    master_bound: float | None = None
     proven = False
     rounds = 0
+    stable_rounds = 0
     iteration_limit_reached = False
 
     constructed = _best_construction(nodes, dataset, matrix, units_by_id, weights, scales)
@@ -358,26 +599,94 @@ def solve_joint(
                 scales,
             )
 
+    agent_budget = 2.0 if len(nodes) <= 12 else (12.0 if prove_optimal else 8.0)
+    agent_end = min(deadline - 1.0, time.monotonic() + agent_budget)
+    if agent_end > time.monotonic() + 0.2:
+        proposed = propose_initial(
+            nodes,
+            dataset,
+            matrix,
+            units_by_id,
+            weights,
+            scales,
+            constructed,
+            agent_end,
+            seed,
+            fixed_nodes,
+        )
+        if proposed is not None and (best_score is None or proposed[3] < best_score - 1e-9):
+            constructed, best_routes, best_placements, best_score = proposed
+
     hint = None
     if constructed is not None:
         hint = {vehicle_id: [node.node_id for node in sequence] for vehicle_id, sequence in constructed.items()}
     last_route_objective: float | None = None
+    large = len(nodes) > 12
+    unknown_streak = 0
+    idle_rounds = 0
 
-    if len(nodes) <= 12:
-        max_rounds = 20
+    def _polish() -> bool:
+        nonlocal best_score, best_routes, best_placements, hint
+        if not large or hint is None or time.monotonic() > deadline - 6:
+            return False
+        covered = [node_id for node_ids in hint.values() for node_id in node_ids]
+        if len(covered) != len(nodes):
+            return False
+        assignment = {vehicle.id: [] for vehicle in dataset.vehicles}
+        for vehicle_id, node_ids in hint.items():
+            if vehicle_id not in assignment:
+                continue
+            assignment[vehicle_id] = [node_by_id[node_id] for node_id in node_ids if node_id in node_by_id]
+        polish_end = min(deadline - 6.0, time.monotonic() + (30.0 if prove_optimal else 12.0))
+        if polish_end - time.monotonic() < 0.4:
+            return False
+        polished = adaptive_improve(
+            assignment,
+            dataset,
+            matrix,
+            units_by_id,
+            weights,
+            scales,
+            polish_end,
+            seed + 1000 + rounds,
+            fixed_nodes,
+        )
+        if polished is None:
+            return False
+        improved, routes, placements, score = polished
+        if best_score is not None and score >= best_score - 1e-9:
+            return False
+        best_score = score
+        best_routes = routes
+        best_placements = placements
+        hint = {vehicle_id: [node.node_id for node in sequence] for vehicle_id, sequence in improved.items()}
+        return True
+
+    if not large:
+        max_rounds = 40 if prove_optimal else 20
         master_slice = None
-    elif best_routes is not None:
-        max_rounds = 1
-        master_slice = 12.0
+    elif prove_optimal:
+        max_rounds = 40
+        master_slice = 30.0
     else:
-        max_rounds = 2
-        master_slice = 20.0
+        max_rounds = 8
+        master_slice = 12.0
+    effective_workers = search_workers if search_workers > 1 else (8 if large else 1)
     while time.monotonic() < deadline and rounds < max_rounds:
         rounds += 1
         remaining = deadline - time.monotonic()
         if remaining < 0.2:
             iteration_limit_reached = True
             break
+        if prove_optimal and (master_slice is None or stable_rounds >= 1):
+            # Prove mode spends leftover time on the bound. Default mode keeps
+            # short slices so a stalled incumbent does not eat the whole budget.
+            round_limit = remaining
+        elif master_slice is None:
+            round_limit = remaining
+        else:
+            first_slice = 20.0 if rounds == 1 else master_slice
+            round_limit = min(first_slice, remaining)
         outcome = solve_master(
             nodes,
             dataset,
@@ -386,13 +695,21 @@ def solve_joint(
             scales,
             set_cuts,
             arc_cuts,
-            time_limit_s=remaining if master_slice is None else min(master_slice, remaining),
+            time_limit_s=round_limit,
             seed=seed + rounds,
             hint=hint,
             fixed_nodes=fixed_nodes,
+            assignment_cuts=assignment_cuts,
+            search_workers=effective_workers,
+            use_circuit=(not large) or rounds > 1,
         )
-        if outcome.bound_j is not None:
+        if outcome.bound_j is not None and outcome.bound_j > 1e-6:
+            master_bound = outcome.bound_j if master_bound is None else max(master_bound, outcome.bound_j)
             lower_bound = outcome.bound_j if lower_bound is None else max(lower_bound, outcome.bound_j)
+        if best_score is not None and master_bound is not None and master_bound >= best_score - BOUND_TOL:
+            # Nothing outside the excluded partitions can beat the incumbent.
+            proven = True
+            break
         if outcome.status == "infeasible":
             if best_routes is None:
                 return _failed(
@@ -400,12 +717,23 @@ def solve_joint(
                     "No route satisfies the time windows and packing cuts",
                     store_ids=sorted({node.store_id for node in nodes}),
                 )
+            # Every remaining assignment is excluded or unpackable: the
+            # incumbent is the joint optimum (up to packer false negatives).
+            proven = True
             break
         if outcome.status == "unknown" or not outcome.assignment:
             if outcome.status == "unknown":
                 iteration_limit_reached = time.monotonic() >= deadline - 0.2
             if not outcome.assignment:
-                break
+                unknown_streak += 1
+                polished = _polish()
+                if polished:
+                    unknown_streak = 0
+                    idle_rounds = 0
+                if not large or unknown_streak >= (6 if prove_optimal else 2):
+                    break
+                continue
+        unknown_streak = 0
         node_by_id = {node.node_id: node for node in nodes}
         assignment = {
             vehicle_id: [node_by_id[node_id] for node_id in sequence]
@@ -413,6 +741,7 @@ def solve_joint(
         }
         routes = materialize_routes(assignment, dataset, matrix)
         if routes is None:
+            stable_rounds = 0
             for vehicle_id, sequence in assignment.items():
                 arc_cuts.append(ArcCut(sequence_arcs([node.node_id for node in sequence]), frozenset({vehicle_id})))
             continue
@@ -420,30 +749,57 @@ def solve_joint(
         if failed_vehicle is None and routes is not None:
             unit_orders = {unit.unit_id: unit.order_id for unit in units}
             full = score_routes(routes, placements, split_order_count(routes, unit_orders), weights, scales, True)
-            route_only = score_routes(routes, placements, split_order_count(routes, unit_orders), weights, scales, False)
-            if best_score is None or full < best_score - 1e-9:
+            improved = best_score is None or full < best_score - 1e-9
+            if improved:
                 best_score = full
                 best_routes = routes
                 best_placements = placements
                 hint = {vehicle_id: [node.node_id for node in sequence] for vehicle_id, sequence in assignment.items()}
+                idle_rounds = 0
             if outcome.status == "optimal":
-                lower_bound = route_only
-                if abs(full - route_only) <= 1e-6 and (best_score is None or abs(best_score - route_only) <= 1e-6):
+                # Keep floor/volume layers already priced in the master. Dropping
+                # them to the route-only score re-opens a fake handling gap.
+                if outcome.bound_j is not None and (
+                    best_score is None or outcome.bound_j <= best_score + BOUND_TOL
+                ):
+                    lower_bound = max(lower_bound, outcome.bound_j)
+                    master_bound = (
+                        outcome.bound_j if master_bound is None else max(master_bound, outcome.bound_j)
+                    )
+                if master_bound is not None and best_score is not None and master_bound >= best_score - BOUND_TOL:
                     proven = True
-                    best_routes = routes
-                    best_placements = placements
-                    best_score = full
-                break
-            if (
+                    break
+                # Packed extras still sit above the master's layer estimate:
+                # forbid this exact partition and enumerate the next route
+                # optimum until the bound reaches the packed incumbent.
+                key = _partition_key(assignment, dataset)
+                if key in excluded_partitions:
+                    iteration_limit_reached = True
+                    break
+                excluded_partitions.add(key)
+                assignment_cuts.extend(_assignment_exclusions(assignment, dataset))
+                stable_rounds = 0
+                continue
+            stable_rounds += 1
+            stalled = (
                 last_route_objective is not None
                 and outcome.objective_j is not None
                 and outcome.objective_j >= last_route_objective - 1e-9
-            ):
-                break
+            )
             last_route_objective = outcome.objective_j
+            allow_polish = prove_optimal or improved or idle_rounds == 0
+            if allow_polish and _polish():
+                idle_rounds = 0
+            elif not improved:
+                idle_rounds += 1
+            if stalled and not large:
+                break
+            if not prove_optimal and best_score is not None and idle_rounds >= (2 if large else 1):
+                break
             continue
         vehicle = next(item for item in dataset.vehicles if item.id == failed_vehicle)
         sequence = assignment[failed_vehicle]
+        stable_rounds = 0
         if len(sequence) <= 4 and can_pack_nodes(sequence, vehicle, dataset.loading_rule, units_by_id):
             arc_cuts.append(ArcCut(sequence_arcs([node.node_id for node in sequence]), frozenset({failed_vehicle})))
             continue
@@ -471,7 +827,8 @@ def solve_joint(
             iteration_limit_reached = True
             break
         set_cuts.append(new_cut)
-        hint = None
+        # The incumbent still packs, so it cannot contain the forbidden subset:
+        # keep it as the hint instead of restarting the master blind.
     else:
         if rounds >= max_rounds:
             iteration_limit_reached = True
@@ -504,11 +861,20 @@ def replan(
     seed: int = 1,
     time_limit_s: float = 180.0,
     locked_vehicle_ids: list[str] | None = None,
+    prove_optimal: bool = False,
+    search_workers: int = 1,
 ) -> JointResult:
     """Keep locked vehicles unchanged and keep locked orders on their previous vehicles."""
     weights = weights or Weights()
     if previous.status != "completed" or (not locked_order_ids and not locked_vehicle_ids):
-        return solve_joint(dataset, weights=weights, seed=seed, time_limit_s=time_limit_s)
+        return solve_joint(
+            dataset,
+            weights=weights,
+            seed=seed,
+            time_limit_s=time_limit_s,
+            prove_optimal=prove_optimal,
+            search_workers=search_workers,
+        )
     frozen_ids = set(locked_vehicle_ids or [])
     frozen_routes = [route for route in previous.routes if route.vehicle_id in frozen_ids]
     frozen_vehicles = {route.vehicle_id for route in frozen_routes}
@@ -551,6 +917,8 @@ def replan(
         seed=seed,
         time_limit_s=time_limit_s,
         fixed_nodes=fixed or None,
+        prove_optimal=prove_optimal,
+        search_workers=search_workers,
     )
     if partial.status != "completed" or not frozen_routes:
         return partial

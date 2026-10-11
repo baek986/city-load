@@ -130,6 +130,7 @@ def build_scene(dataset: Dataset, result: JointResult, scenario: dict) -> dict:
         "summary": {
             "proven_optimal": result.proven_optimal,
             "gap": result.gap,
+            "bound_established": result.bound_established,
             "lower_bound": result.lower_bound,
             "upper_bound": result.upper_bound,
             "score": result.score,

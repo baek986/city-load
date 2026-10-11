@@ -33,7 +33,7 @@ def _error_detail(code: str, message: str, unit_ids: list[str] | None = None, st
     return {"code": code, "message": message, "unit_ids": unit_ids or [], "store_ids": store_ids or []}
 
 
-def _run_plan(engine, plan_id: str, time_limit_s: float) -> None:
+def _run_plan(engine, plan_id: str, time_limit_s: float, prove_optimal: bool = False) -> None:
     session = Session(engine)
     repo = Repository(session)
     try:
@@ -42,7 +42,7 @@ def _run_plan(engine, plan_id: str, time_limit_s: float) -> None:
             return
         dataset = repo.load_dataset(row.service_date)
         weights = Weights.model_validate_json(row.weights_json)
-        result = solve_joint(dataset, weights=weights, seed=row.seed, time_limit_s=time_limit_s)
+        result = solve_joint(dataset, weights=weights, seed=row.seed, time_limit_s=time_limit_s, prove_optimal=prove_optimal)
         repo.save_result(plan_id, result)
         session.commit()
     except Exception as exc:
@@ -207,7 +207,7 @@ def post_plan(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=_error_detail("missing_depot", str(exc))) from exc
     plan_id = repo.create_plan(body.date, body.weights, body.seed)
-    background.add_task(_run_plan, request.app.state.engine, plan_id, body.time_limit_s)
+    background.add_task(_run_plan, request.app.state.engine, plan_id, body.time_limit_s, body.prove_optimal)
     return {"plan_id": plan_id, "status": "running"}
 
 
@@ -282,6 +282,7 @@ def post_replan(
                 seed=seed,
                 time_limit_s=body.time_limit_s,
                 locked_vehicle_ids=body.locked_vehicle_ids,
+                prove_optimal=body.prove_optimal,
             )
             local.save_result(new_id, result)
             session.commit()

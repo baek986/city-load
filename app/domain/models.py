@@ -89,6 +89,12 @@ class LoadingRule(BaseModel):
     max_overhang_mm: int = 0
     fragile_no_stack: bool = True
     split_penalty: float = 1.0
+    # Packing preferences used by the per-item placer. On so extra_handling
+    # stays close to geometric layers instead of counting every jagged z.
+    # fragile_avoid_floor: try every non-floor pose for fragile units before z=0.
+    # align_levels: prefer z-levels that already hold many boxes.
+    fragile_avoid_floor: bool = True
+    align_levels: bool = True
 
 
 class Weights(BaseModel):
@@ -141,6 +147,8 @@ class CustomerNode(BaseModel):
     window_open_s: int
     window_close_s: int
     soft_deadline_s: int | None = None
+    footprint_mm2: int = 0
+    max_extent_mm: int = 0
 
 
 class StopPlan(BaseModel):
@@ -227,6 +235,7 @@ class JointResult(BaseModel):
     lower_bound: float | None = None
     upper_bound: float | None = None
     gap: float | None = None
+    bound_established: bool = False
     score: float | None = None
     split_order_count: int = 0
     on_time_rate: float = 1.0

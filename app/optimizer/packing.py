@@ -9,6 +9,7 @@ Inside one stop, identical cartons stay together and fill a row of equal height.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from itertools import permutations
 
@@ -97,21 +98,78 @@ def _overlaps_box(x: int, y: int, z: int, dx: int, dy: int, dz: int, boxes: list
     return False
 
 
+_PATH_BUDGET = 4096
+
+
+def _aggregate_loads(boxes: list[_Box], index: int, added: int) -> dict[int, int]:
+    """Total extra load per box if `added` lands on `index`, in O(edges).
+
+    Bearers always sit below and were placed earlier, so their list indices are
+    smaller; walking indices high-to-low accumulates every path's contribution
+    before that node is visited. Used when the bearer DAG is too shared for
+    per-path enumeration (tall mixed stacks), where the recursive version
+    revisited shared bearers exponentially and blew the recursion limit.
+    """
+    pending = [0] * len(boxes)
+    pending[index] = added
+    for current in range(len(boxes) - 1, -1, -1):
+        load = pending[current]
+        if not load:
+            continue
+        for bearer_index, fraction in boxes[current].bearers:
+            pending[bearer_index] += math.ceil(load * fraction)
+    return {current: load for current, load in enumerate(pending) if load}
+
+
+def _path_loads(boxes: list[_Box], index: int, added: int) -> dict[int, int] | None:
+    """Per-path load spread, identical to the original recursive version.
+
+    Returns None when the bearer DAG needs more than _PATH_BUDGET edge visits.
+    """
+    pending: dict[int, int] = {}
+    stack = [(index, added)]
+    visited = 0
+    while stack:
+        current, load = stack.pop()
+        pending[current] = pending.get(current, 0) + load
+        box = boxes[current]
+        for bearer_index, fraction in box.bearers:
+            stack.append((bearer_index, math.ceil(load * fraction)))
+        visited += len(box.bearers) + 1
+        if visited > _PATH_BUDGET:
+            return None
+    return pending
+
+
 def _would_exceed(boxes: list[_Box], index: int, added: int) -> bool:
-    box = boxes[index]
-    if box.load_on_top_g + added > box.unit.max_stack_load_g:
-        return True
-    for bearer_index, fraction in box.bearers:
-        share = math.ceil(added * fraction)
-        if _would_exceed(boxes, bearer_index, share):
+    # Per-path check (historical semantics): every propagation path is tested
+    # on its own, exactly like the original recursion but without the call
+    # stack. Deep shared-bearer DAGs fall back to the sound aggregate check.
+    stack = [(index, added)]
+    visited = 0
+    while stack:
+        current, load = stack.pop()
+        box = boxes[current]
+        if box.load_on_top_g + load > box.unit.max_stack_load_g:
             return True
+        for bearer_index, fraction in box.bearers:
+            stack.append((bearer_index, math.ceil(load * fraction)))
+        visited += len(box.bearers) + 1
+        if visited > _PATH_BUDGET:
+            pending = _aggregate_loads(boxes, index, added)
+            return any(
+                boxes[current].load_on_top_g + load > boxes[current].unit.max_stack_load_g
+                for current, load in pending.items()
+            )
     return False
 
 
 def _add_load(boxes: list[_Box], index: int, added: int) -> None:
-    boxes[index].load_on_top_g += added
-    for bearer_index, fraction in boxes[index].bearers:
-        _add_load(boxes, bearer_index, math.ceil(added * fraction))
+    pending = _path_loads(boxes, index, added)
+    if pending is None:
+        pending = _aggregate_loads(boxes, index, added)
+    for current, load in pending.items():
+        boxes[current].load_on_top_g += load
 
 
 def _support(
@@ -274,6 +332,35 @@ def _pack_walls(
     return boxes, []
 
 
+def _pack_block_orders(
+    units: list[PackingUnit],
+    max_length: int,
+    width: int,
+    height: int,
+    rule: LoadingRule,
+) -> list[list[_Box]]:
+    """Every block the constructive orders produce, so attaching can try them all."""
+    if not units:
+        return [[]]
+    for unit in units:
+        if not any(dx <= max_length and dy <= width and dz <= height for _, dx, dy, dz in _orientations(unit)):
+            return []
+    volume = sum(unit.volume_mm3 for unit in units)
+    if volume > max_length * width * height:
+        return []
+    primary = _sorted_units(units)
+    orders = [primary]
+    alternate = _alternate_units(units)
+    if [unit.unit_id for unit in alternate] != [unit.unit_id for unit in primary]:
+        orders.append(alternate)
+    blocks: list[list[_Box]] = []
+    for ordered in orders:
+        boxes, _failed = _pack_walls(ordered, max_length, width, height, rule)
+        if boxes is not None:
+            blocks.append(boxes)
+    return blocks
+
+
 def _pack_block(
     units: list[PackingUnit],
     max_length: int,
@@ -289,18 +376,12 @@ def _pack_block(
     volume = sum(unit.volume_mm3 for unit in units)
     if volume > max_length * width * height:
         return None, 0, [unit.unit_id for unit in units]
-    primary = _sorted_units(units)
-    orders = [primary]
-    alternate = _alternate_units(units)
-    if [unit.unit_id for unit in alternate] != [unit.unit_id for unit in primary]:
-        orders.append(alternate)
-    failed: list[str] = []
-    for ordered in orders:
-        boxes, failed = _pack_walls(ordered, max_length, width, height, rule)
-        if boxes is not None:
-            used = max((box.x + box.dx for box in boxes), default=0)
-            return boxes, used, []
-    return None, 0, failed
+    blocks = _pack_block_orders(units, max_length, width, height, rule)
+    if not blocks:
+        return None, 0, [unit.unit_id for unit in units]
+    boxes = blocks[0]
+    used = max((box.x + box.dx for box in boxes), default=0)
+    return boxes, used, []
 
 
 def later_blocks_earlier(later: Placement, earlier: Placement) -> bool:
@@ -451,20 +532,20 @@ def _place_block(
     vehicle: Vehicle,
     rule: LoadingRule,
 ) -> list[_Box] | None:
-    local, _depth, _failed = _pack_block(units, vehicle.length_mm, vehicle.width_mm, vehicle.height_mm, rule)
-    if not local:
-        return None
-    span_x = max(box.x + box.dx for box in local)
-    span_y = max(box.y + box.dy for box in local)
-    span_z = max(box.z + box.dz for box in local)
-    origins = _block_origins(span_x, span_y, span_z, existing, vehicle.length_mm, vehicle.width_mm, vehicle.height_mm)
-    origins.sort(key=lambda item: (item[2], -item[0], item[1]))
-    if len(units) > 40:
-        origins = origins[:16]
-    for ox, oy, oz in origins:
-        shifted = _try_attach(local, ox, oy, oz, existing, vehicle, rule)
-        if shifted is not None:
-            return shifted
+    for local in _pack_block_orders(units, vehicle.length_mm, vehicle.width_mm, vehicle.height_mm, rule):
+        if not local:
+            continue
+        span_x = max(box.x + box.dx for box in local)
+        span_y = max(box.y + box.dy for box in local)
+        span_z = max(box.z + box.dz for box in local)
+        origins = _block_origins(span_x, span_y, span_z, existing, vehicle.length_mm, vehicle.width_mm, vehicle.height_mm)
+        origins.sort(key=lambda item: (item[2], -item[0], item[1]))
+        if len(units) > 40:
+            origins = origins[:32]
+        for ox, oy, oz in origins:
+            shifted = _try_attach(local, ox, oy, oz, existing, vehicle, rule)
+            if shifted is not None:
+                return shifted
     return None
 
 
@@ -510,33 +591,43 @@ def _commit_pose(
     vehicle: Vehicle,
     rule: LoadingRule,
 ) -> _Box | None:
+    """Best-key feasible pose. Scans in key order and stops at the first hit."""
     occupied = existing + added
-    best: tuple[tuple[int, int, int, int, int, int, str], _Box, list[tuple[int, float]]] | None = None
+    bottom_counts: Counter[int] | None = None
+    if rule.align_levels:
+        bottom_counts = Counter(box.z for box in occupied)
+    candidates: list[tuple] = []
     for rotation, dx, dy, dz in _orientations(unit):
         for x, y, z in _pose_candidates(dx, dy, dz, occupied, vehicle.length_mm, vehicle.width_mm, vehicle.height_mm):
-            if _overlaps_box(x, y, z, dx, dy, dz, occupied):
-                continue
-            blocked = any(
-                _blocks(later.x, later.y, later.z, later.dx, later.dy, later.dz, x, y, z, dx, dy, dz)
-                for later in existing
-            )
-            if blocked:
-                continue
-            if rule.fragile_no_stack and _above_fragile(x, y, z, dx, dy, occupied):
-                continue
-            supported, bearers = _support(x, y, z, dx, dy, unit, occupied, rule)
-            if not supported:
-                continue
-            key = (z, -x, y, dz, dy, dx, rotation)
-            if best is None or key < best[0]:
-                best = (key, _Box(unit, x, y, z, dx, dy, dz, rotation), bearers)
-    if best is None:
-        return None
-    _key, placed, bearers = best
-    placed.bearers = bearers
-    for index, fraction in bearers:
-        _add_load(occupied, index, math.ceil(unit.weight_g * fraction))
-    return placed
+            key: list = []
+            if rule.fragile_avoid_floor and unit.fragile:
+                key.append(1 if z == 0 else 0)
+            if bottom_counts is not None:
+                key.append(-bottom_counts.get(z, 0))
+            key.extend((z, -x, y, dz, dy, dx, rotation))
+            candidates.append(tuple(key))
+    candidates.sort()
+    for *_, z, neg_x, y, dz, dy, dx, rotation in candidates:
+        x = -neg_x
+        if _overlaps_box(x, y, z, dx, dy, dz, occupied):
+            continue
+        blocked = any(
+            _blocks(later.x, later.y, later.z, later.dx, later.dy, later.dz, x, y, z, dx, dy, dz)
+            for later in existing
+        )
+        if blocked:
+            continue
+        if rule.fragile_no_stack and _above_fragile(x, y, z, dx, dy, occupied):
+            continue
+        supported, bearers = _support(x, y, z, dx, dy, unit, occupied, rule)
+        if not supported:
+            continue
+        placed = _Box(unit, x, y, z, dx, dy, dz, rotation)
+        placed.bearers = bearers
+        for index, fraction in bearers:
+            _add_load(occupied, index, math.ceil(unit.weight_g * fraction))
+        return placed
+    return None
 
 
 def _place_items(
@@ -604,6 +695,79 @@ def _place_stop(
     return _place_in_front(units, existing, vehicle, rule)
 
 
+def _commit_perch(
+    unit: PackingUnit,
+    occupied: list[_Box],
+    vehicle: Vehicle,
+    rule: LoadingRule,
+) -> _Box | None:
+    """First feasible pose that sits on another carton, never on the floor."""
+    length, width, height = vehicle.length_mm, vehicle.width_mm, vehicle.height_mm
+    platforms = [
+        box
+        for box in occupied
+        if box.unit.stackable and not box.unit.fragile and box.unit.store_id == unit.store_id
+    ]
+    platforms.sort(key=lambda box: (-(box.z + box.dz), -(box.dx * box.dy), box.unit.unit_id))
+    platforms = platforms[:16]
+    for rotation, dx, dy, dz in _orientations(unit):
+        for bearer in platforms:
+            z = bearer.z + bearer.dz
+            if z <= 0 or z + dz > height:
+                continue
+            for x, y in (
+                (bearer.x, bearer.y),
+                (bearer.x + bearer.dx - dx, bearer.y),
+                (bearer.x, bearer.y + bearer.dy - dy),
+                (0, bearer.y),
+                (bearer.x, 0),
+            ):
+                if x < 0 or y < 0 or x + dx > length or y + dy > width:
+                    continue
+                if _overlaps_box(x, y, z, dx, dy, dz, occupied):
+                    continue
+                if any(
+                    _blocks(later.x, later.y, later.z, later.dx, later.dy, later.dz, x, y, z, dx, dy, dz)
+                    for later in occupied
+                ):
+                    continue
+                if rule.fragile_no_stack and _above_fragile(x, y, z, dx, dy, occupied):
+                    continue
+                supported, bearers = _support(x, y, z, dx, dy, unit, occupied, rule)
+                if not supported:
+                    continue
+                placed = _Box(unit, x, y, z, dx, dy, dz, rotation)
+                placed.bearers = bearers
+                for index, fraction in bearers:
+                    _add_load(occupied, index, math.ceil(unit.weight_g * fraction))
+                return placed
+    return None
+
+
+def _lift_fragile(accepted: list[_Box], vehicle: Vehicle, rule: LoadingRule) -> None:
+    """Re-place fragile floor boxes on perches above other cargo.
+
+    Walls are floor-standing strips, so a wall of fragile units (sorted last)
+    puts fragile cartons at z=0, which extra_handling still prices when a store
+    mixes fragile and sturdy cartons. A lift only tries
+    poses on existing tops, so it stays cheap on large loads. A box that finds
+    no perch keeps its original slot.
+    """
+    fragile_on_floor = sorted(
+        (box for box in accepted if box.unit.fragile and box.z == 0),
+        key=lambda box: box.unit.unit_id,
+    )
+    for box in fragile_on_floor:
+        others = [item for item in accepted if item is not box]
+        snapshot = _load_snapshot(others)
+        placed = _commit_perch(box.unit, others, vehicle, rule)
+        if placed is None:
+            _restore_loads(others, snapshot)
+            continue
+        accepted.remove(box)
+        accepted.append(placed)
+
+
 def _as_placement(vehicle: Vehicle, box: _Box) -> Placement:
     return Placement(
         unit_id=box.unit.unit_id,
@@ -643,6 +807,8 @@ def _pack_cache_key(vehicle: Vehicle, stops: list[PackStop], rule: LoadingRule) 
         rule.min_support_ratio,
         rule.max_overhang_mm,
         rule.fragile_no_stack,
+        rule.fragile_avoid_floor,
+        rule.align_levels,
         tuple(
             (
                 stop.store_id,
@@ -700,7 +866,39 @@ def _pack_stops(vehicle: Vehicle, stops: list[PackStop], rule: LoadingRule) -> P
             )
         accepted.extend(added)
         placed.extend(_as_placement(vehicle, box) for box in added)
+    if rule.fragile_avoid_floor:
+        load_snap = _load_snapshot(accepted)
+        boxes_snap = list(accepted)
+        _lift_fragile(accepted, vehicle, rule)
+        lifted = [_as_placement(vehicle, box) for box in accepted]
+        if _delivery_blocked(stops, lifted):
+            accepted[:] = boxes_snap
+            _restore_loads(accepted, load_snap)
+        else:
+            placed = lifted
+    if _delivery_blocked(stops, placed):
+        return PackResult(
+            ok=False,
+            placements=placed,
+            failed_unit_ids=[unit.unit_id for stop in stops for unit in stop.units],
+            reason="geometry",
+        )
     return PackResult(ok=True, placements=placed)
+
+
+def _delivery_blocked(stops: list[PackStop], placements: list[Placement]) -> bool:
+    """True when a later stop's carton blocks an earlier stop at unload."""
+    by_unit = {item.unit_id: item for item in placements}
+    grouped: list[list[Placement]] = []
+    for stop in stops:
+        grouped.append([by_unit[unit.unit_id] for unit in stop.units if unit.unit_id in by_unit])
+    for earlier_index, earlier_boxes in enumerate(grouped):
+        for later_boxes in grouped[earlier_index + 1 :]:
+            for earlier in earlier_boxes:
+                for later in later_boxes:
+                    if later_blocks_earlier(later, earlier):
+                        return True
+    return False
 
 
 def stops_from_nodes(nodes: list[CustomerNode], units_by_id: dict[str, PackingUnit]) -> list[PackStop]:

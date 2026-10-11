@@ -58,6 +58,18 @@ def _rotations(unit: PackingUnit) -> list[tuple[int, int, int]]:
     return boxes
 
 
+def min_footprint_mm2(unit: PackingUnit) -> int:
+    """Smallest base the carton can stand on under its allowed rotations."""
+    faces = [dx * dy for dx, dy, _dz in _rotations(unit)]
+    return min(faces) if faces else unit.length_mm * unit.width_mm
+
+
+def max_standing_height_mm(unit: PackingUnit) -> int:
+    """Tallest the carton can stand under its allowed rotations."""
+    heights = [dz for _dx, _dy, dz in _rotations(unit)]
+    return max(heights) if heights else unit.height_mm
+
+
 def unit_fits_vehicle(unit: PackingUnit, vehicle: Vehicle) -> bool:
     if unit.weight_g > vehicle.max_weight_g or unit.volume_mm3 > vehicle.volume_mm3:
         return False
@@ -88,6 +100,8 @@ def make_node(node_id: str, store_id: str, units: list[PackingUnit], dataset: Da
         window_open_s=store.window_open_s,
         window_close_s=store.window_close_s,
         soft_deadline_s=store.soft_deadline_s,
+        footprint_mm2=sum(min_footprint_mm2(unit) for unit in units),
+        max_extent_mm=max((max_standing_height_mm(unit) for unit in units), default=0),
     )
 
 

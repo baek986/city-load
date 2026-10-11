@@ -12,12 +12,13 @@ class PlanCreate(BaseModel):
     weights: Weights = Field(default_factory=Weights)
     seed: int = 1
     time_limit_s: float = 180.0
+    prove_optimal: bool = False
 
 
 class DemoSolve(BaseModel):
     scenario: str = "heavy"
     seed: int = 3
-    time_limit_s: float = 50.0
+    time_limit_s: float = 90.0
 
 
 class ReplanCreate(BaseModel):
@@ -26,3 +27,4 @@ class ReplanCreate(BaseModel):
     weights: Weights | None = None
     seed: int | None = None
     time_limit_s: float = 180.0
+    prove_optimal: bool = False

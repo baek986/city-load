@@ -124,6 +124,7 @@
       gap: 10px;
       padding: 12px 20px 0;
     }
+    .optimality-line:empty { display: none; padding: 0; }
     .optimality-line .stat { flex: none; }
     .breakdown {
       display: flex;
@@ -243,7 +244,7 @@
       <button id="run" type="button">生成方案<span class="spinner"></span></button>
     </div>
   </header>
-  <div id="status" class="status">选择场景后生成方案。30 店大约需要十几秒到半分钟。</div>
+  <div id="status" class="status">选择场景后生成方案。30 店大约需要一两分钟，用来多迭代几轮。</div>
   <div id="optimality" class="optimality-line"></div>
   <div id="stats" class="stats"></div>
   <div id="breakdown" class="breakdown"></div>
@@ -1294,13 +1295,7 @@
       if (summary.proven_optimal) {
         return { cls: "proven", text: "✓ 已证明最优" };
       }
-      const gap = summary.gap == null ? null : Number(summary.gap);
-      if (gap == null) {
-        return { cls: "unproven", text: "未证明最优" };
-      }
-      const pct = (gap * 100).toFixed(1);
-      const cls = gap < 0.05 ? "near" : "unproven";
-      return { cls: cls, text: "未证明最优 · 间隙 " + pct + "%" };
+      return null;
     }
 
     function renderStats() {
@@ -1314,10 +1309,12 @@
       const summary = state.scene.summary;
 
       const opt = optimalityInfo(summary);
-      const optItem = document.createElement("span");
-      optItem.className = "stat optimality " + opt.cls;
-      optItem.textContent = opt.text;
-      optHost.appendChild(optItem);
+      if (opt) {
+        const optItem = document.createElement("span");
+        optItem.className = "stat optimality " + opt.cls;
+        optItem.textContent = opt.text;
+        optHost.appendChild(optItem);
+      }
 
       const bits = [
         summary.store_count + " 家店",

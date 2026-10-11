@@ -1,9 +1,11 @@
 """Exact heterogeneous VRPTW master.
 
 CP-SAT minimizes transport cost and driving time under weight, volume, and time
-windows. Packing cuts forbid a set of stops from sharing a vehicle. The solver
-bound is a lower bound on the joint objective because a feasible loading cannot
-make that route cheaper.
+windows. Extra stacking implied by floor area and cargo height is in the
+objective, so the bound sees the same handling layers as a packed plan. Packing
+cuts forbid a set of stops from sharing a vehicle. Circuit constraints replace
+MTZ after a first incumbent exists on large instances; they are used from the
+start on small ones.
 """
 
 from __future__ import annotations
@@ -29,6 +31,13 @@ class SetCut:
 class ArcCut:
     arcs: tuple[tuple[str, str], ...]
     vehicle_ids: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
+class AssignmentCut:
+    """Forbid one exact node-to-vehicle partition, so route optima can be enumerated."""
+
+    pairs: tuple[tuple[str, str], ...]
 
 
 @dataclass
@@ -116,11 +125,15 @@ def solve_master(
     seed: int,
     hint: dict[str, list[str]] | None = None,
     fixed_nodes: dict[str, str] | None = None,
+    assignment_cuts: list[AssignmentCut] | None = None,
+    search_workers: int = 1,
+    use_circuit: bool = False,
 ) -> MasterOutcome:
     if not nodes:
         return MasterOutcome(status="optimal", assignment={}, bound_j=0.0, objective_j=0.0)
     model = cp_model.CpModel()
     vehicles = list(dataset.vehicles)
+    vehicle_index_of = {vehicle.id: index for index, vehicle in enumerate(vehicles)}
     node_index = {node.node_id: index + 1 for index, node in enumerate(nodes)}
     customer_indexes = list(range(1, len(nodes) + 1))
     all_indexes = [0, *customer_indexes]
@@ -131,6 +144,8 @@ def solve_master(
     arrival: dict[tuple[int, int], cp_model.IntVar] = {}
     late: dict[tuple[int, int], cp_model.IntVar] = {}
     position: dict[tuple[int, int], cp_model.IntVar] = {}
+    skip_node: dict[tuple[int, int], cp_model.IntVar] = {}
+    tend: dict[int, cp_model.IntVar] = {}
     locations = [dataset.depot.id, *[node.store_id for node in nodes]]
     possible = [
         (origin, dest)
@@ -146,7 +161,8 @@ def solve_master(
         for customer in customer_indexes:
             y[vehicle_index, customer] = model.NewBoolVar(f"y_{vehicle_index}_{customer}")
             late[vehicle_index, customer] = model.NewIntVar(0, horizon, f"late_{vehicle_index}_{customer}")
-            position[vehicle_index, customer] = model.NewIntVar(0, len(nodes), f"u_{vehicle_index}_{customer}")
+            if not use_circuit:
+                position[vehicle_index, customer] = model.NewIntVar(0, len(nodes), f"u_{vehicle_index}_{customer}")
         for origin, dest in possible:
             arcs[vehicle_index, origin, dest] = model.NewBoolVar(f"a_{vehicle_index}_{origin}_{dest}")
 
@@ -169,6 +185,7 @@ def solve_master(
         model.Add(arrival[vehicle_index, 0] >= dataset.depot.window_open_s)
         model.Add(arrival[vehicle_index, 0] <= dataset.depot.window_close_s)
         return_time = model.NewIntVar(0, horizon, f"tend_{vehicle_index}")
+        tend[vehicle_index] = return_time
         model.Add(return_time <= dataset.depot.window_close_s)
         for customer in customer_indexes:
             node = nodes[customer - 1]
@@ -176,8 +193,9 @@ def solve_master(
             outbound = [arcs[vehicle_index, customer, other] for other in all_indexes if (vehicle_index, customer, other) in arcs]
             model.Add(sum(inbound) == y[vehicle_index, customer])
             model.Add(sum(outbound) == y[vehicle_index, customer])
-            model.Add(position[vehicle_index, customer] == 0).OnlyEnforceIf(y[vehicle_index, customer].Not())
-            model.Add(position[vehicle_index, customer] >= 1).OnlyEnforceIf(y[vehicle_index, customer])
+            if not use_circuit:
+                model.Add(position[vehicle_index, customer] == 0).OnlyEnforceIf(y[vehicle_index, customer].Not())
+                model.Add(position[vehicle_index, customer] >= 1).OnlyEnforceIf(y[vehicle_index, customer])
             model.Add(arrival[vehicle_index, customer] >= node.window_open_s).OnlyEnforceIf(y[vehicle_index, customer])
             model.Add(arrival[vehicle_index, customer] <= node.window_close_s).OnlyEnforceIf(y[vehicle_index, customer])
             if node.soft_deadline_s is None:
@@ -199,6 +217,30 @@ def solve_master(
             sum(node.volume_mm3 * y[vehicle_index, index] for index, node in enumerate(nodes, start=1))
             <= vehicle.volume_mm3
         )
+        floor_mm2 = max(vehicle.length_mm * vehicle.width_mm, 1)
+        total_footprint = sum(max(node.footprint_mm2, 0) for node in nodes)
+        extra_cap = max(1, len(nodes), (total_footprint + floor_mm2 - 1) // floor_mm2)
+        layer_h = max((getattr(node, "max_extent_mm", 0) or 0) for node in nodes) if nodes else 0
+        layer_vol = 0
+        if layer_h > 0:
+            layer_h = min(layer_h, vehicle.height_mm)
+            layer_vol = floor_mm2 * max(layer_h, 1)
+            extra_cap = max(
+                extra_cap,
+                (sum(node.volume_mm3 for node in nodes) + layer_vol - 1) // layer_vol,
+            )
+        extra_layers = model.NewIntVar(0, extra_cap, f"extra_{vehicle_index}")
+        assigned_footprint = sum(
+            max(node.footprint_mm2, 0) * y[vehicle_index, index] for index, node in enumerate(nodes, start=1)
+        )
+        model.Add(assigned_footprint <= floor_mm2 * extra_layers + floor_mm2)
+        if layer_vol:
+            assigned_volume = sum(
+                node.volume_mm3 * y[vehicle_index, index] for index, node in enumerate(nodes, start=1)
+            )
+            model.Add(assigned_volume <= extra_layers * layer_vol + layer_vol)
+        if stop_weight:
+            objective_terms.append(stop_weight * extra_layers)
 
         service = [0] + [node.service_time_s for node in nodes]
         for origin in all_indexes:
@@ -218,10 +260,19 @@ def solve_master(
                 points = _arc_points(vehicle.cost_per_km, arc.distance_m, arc.travel_time_s, weights, scales)
                 if points:
                     objective_terms.append(points * arcs[vehicle_index, origin, dest])
-                if origin != 0 and dest != 0:
+                if not use_circuit and origin != 0 and dest != 0:
                     model.Add(
                         position[vehicle_index, dest] >= position[vehicle_index, origin] + 1
                     ).OnlyEnforceIf(arcs[vehicle_index, origin, dest])
+        if use_circuit:
+            circuit = [(origin, dest, arcs[vehicle_index, origin, dest]) for origin, dest in possible]
+            circuit.append((0, 0, used[vehicle_index].Not()))
+            for customer in customer_indexes:
+                skip = model.NewBoolVar(f"skip_{vehicle_index}_{customer}")
+                model.Add(skip + y[vehicle_index, customer] == 1)
+                skip_node[vehicle_index, customer] = skip
+                circuit.append((customer, customer, skip))
+            model.AddCircuit(circuit)
 
     order_nodes: dict[str, list[CustomerNode]] = {}
     for node in nodes:
@@ -268,7 +319,19 @@ def solve_master(
             if valid and literals:
                 model.Add(sum(literals) <= len(literals) - 1)
 
-    vehicle_index_of = {vehicle.id: index for index, vehicle in enumerate(vehicles)}
+    for cut in assignment_cuts or []:
+        literals = []
+        valid = True
+        for vehicle_id, node_id in cut.pairs:
+            vehicle_index = vehicle_index_of.get(vehicle_id)
+            customer = node_index.get(node_id)
+            if vehicle_index is None or customer is None:
+                valid = False
+                break
+            literals.append(y[vehicle_index, customer])
+        if valid and len(literals) > 1:
+            model.Add(sum(literals) <= len(literals) - 1)
+
     for node_id, vehicle_id in (fixed_nodes or {}).items():
         if node_id not in node_index or vehicle_id not in vehicle_index_of:
             continue
@@ -292,26 +355,49 @@ def solve_master(
                 model.Add(used[left] >= used[right])
 
     if hint:
+        # Complete hints: every variable gets a value, so CP-SAT can reconstruct
+        # the incumbent exactly instead of repairing a partial assignment.
         hint = _canonical_hint(hint, vehicles)
         service = [0] + [node.service_time_s for node in nodes]
         for vehicle_index, vehicle in enumerate(vehicles):
-            sequence = hint.get(vehicle.id, [])
-            if not sequence:
-                model.AddHint(used[vehicle_index], 0)
-                continue
+            sequence = hint.get(vehicle.id) or []
             if any(node_id not in node_index for node_id in sequence):
-                continue
+                sequence = []
             indexed = [node_index[node_id] for node_id in sequence]
-            arc_keys = [(0, indexed[0]), *zip(indexed, indexed[1:]), (indexed[-1], 0)]
+            arc_keys = [(0, indexed[0]), *zip(indexed, indexed[1:]), (indexed[-1], 0)] if indexed else []
             if any((vehicle_index, origin, dest) not in arcs for origin, dest in arc_keys):
+                indexed = []
+                arc_keys = []
+            served = set(indexed)
+            on_route = set(arc_keys)
+            model.AddHint(used[vehicle_index], 1 if indexed else 0)
+            for customer in customer_indexes:
+                if customer in served:
+                    continue
+                model.AddHint(y[vehicle_index, customer], 0)
+                model.AddHint(late[vehicle_index, customer], 0)
+                if not use_circuit:
+                    model.AddHint(position[vehicle_index, customer], 0)
+                else:
+                    model.AddHint(skip_node[vehicle_index, customer], 1)
+                model.AddHint(arrival[vehicle_index, customer], nodes[customer - 1].window_open_s)
+            for origin, dest in possible:
+                model.AddHint(arcs[vehicle_index, origin, dest], 1 if (origin, dest) in on_route else 0)
+            if not indexed:
+                model.AddHint(arrival[vehicle_index, 0], dataset.depot.window_open_s)
+                model.AddHint(tend[vehicle_index], dataset.depot.window_open_s)
                 continue
-            model.AddHint(used[vehicle_index], 1)
             clock = dataset.depot.window_open_s
             model.AddHint(arrival[vehicle_index, 0], min(horizon, clock))
             previous = 0
+            rank = 0
             for current in indexed:
+                rank += 1
                 model.AddHint(y[vehicle_index, current], 1)
-                model.AddHint(arcs[vehicle_index, previous, current], 1)
+                if not use_circuit:
+                    model.AddHint(position[vehicle_index, current], rank)
+                else:
+                    model.AddHint(skip_node[vehicle_index, current], 0)
                 arc = matrix.get(locations[previous], locations[current])
                 clock += service[previous] + arc.travel_time_s
                 node = nodes[current - 1]
@@ -326,7 +412,9 @@ def solve_master(
                     model.AddHint(late[vehicle_index, current], min(horizon, max(0, clock - node.soft_deadline_s)))
                 previous = current
             else:
-                model.AddHint(arcs[vehicle_index, previous, 0], 1)
+                back = matrix.get(locations[previous], locations[0])
+                clock += service[previous] + back.travel_time_s
+            model.AddHint(tend[vehicle_index], min(horizon, clock))
 
     if objective_terms:
         model.Minimize(sum(objective_terms))
@@ -336,7 +424,7 @@ def solve_master(
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = max(time_limit_s, 0.1)
     solver.parameters.random_seed = seed
-    solver.parameters.num_search_workers = 1
+    solver.parameters.num_search_workers = max(1, search_workers)
     solver.parameters.use_optimization_hints = True
     status = solver.Solve(model)
     if status == cp_model.INFEASIBLE:

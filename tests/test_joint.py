@@ -128,3 +128,59 @@ def test_split_penalty_prefers_the_intact_order() -> None:
     intact = score_routes([route("v1", "s", ["a", "b"])], [], 0, weights, scales)
     split = score_routes([route("v1", "s", ["a"]), route("v2", "s", ["b"])], [], 1, weights, scales)
     assert intact < split
+
+
+def test_triple_packing_cuts_forbid_three_cubes_that_fit_in_pairs() -> None:
+    from app.optimizer.joint import _pair_cuts
+    from app.optimizer.packing import can_pack_nodes
+
+    points = {"depot": (0.0, 0.0), "s1": (100.0, 0.0), "s2": (200.0, 0.0), "s3": (300.0, 0.0)}
+    depot = Location(id="depot", name="depot", kind="depot", x_m=0, y_m=0, window_open_s=0, window_close_s=100_000)
+    stores = [
+        Location(id=store_id, name=store_id, kind="store", x_m=x, y_m=y, window_open_s=0, window_close_s=100_000)
+        for store_id, (x, y) in points.items()
+        if store_id != "depot"
+    ]
+    sku = Sku(id="cube", name="cube", length_mm=400, width_mm=400, height_mm=400, weight_g=100)
+    orders = [
+        Order(
+            id=f"o-{store.id}",
+            store_id=store.id,
+            service_date="2026-10-10",
+            lines=[OrderLine(id=f"l-{store.id}", sku_id="cube", qty=1)],
+        )
+        for store in stores
+    ]
+    vehicles = [
+        Vehicle(
+            id="v1",
+            type_name="van",
+            length_mm=1000,
+            width_mm=500,
+            height_mm=400,
+            max_weight_g=100_000,
+            cost_per_km=1.0,
+            fixed_cost=0.0,
+        )
+    ]
+    dataset = Dataset(
+        depot=depot,
+        stores=stores,
+        skus=[sku],
+        orders=orders,
+        vehicles=vehicles,
+        arcs=[],
+        loading_rule=LoadingRule(),
+    )
+    units = build_units(dataset)
+    units_by_id = {unit.unit_id: unit for unit in units}
+    nodes = group_units_by_store(dataset, units)
+    vehicle = vehicles[0]
+    assert can_pack_nodes(nodes[:2], vehicle, dataset.loading_rule, units_by_id)
+    assert not can_pack_nodes(nodes, vehicle, dataset.loading_rule, units_by_id)
+    cuts = _pair_cuts(nodes, dataset.vehicles, dataset, units_by_id, budget_s=5.0)
+    pairs = [cut for cut in cuts if len(cut.node_ids) == 2]
+    triples = [cut for cut in cuts if len(cut.node_ids) == 3]
+    assert pairs == []
+    assert len(triples) == 1
+    assert triples[0].vehicle_ids is None

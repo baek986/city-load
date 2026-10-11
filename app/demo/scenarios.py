@@ -34,14 +34,14 @@ SCENARIOS = (
         "name": "30 店大药箱",
         "detail": "30 家药店，批发箱，早班、全天和午后窗口错开，一辆货车装不下。",
         "seed": 3,
-        "time_limit_s": 50,
+        "time_limit_s": 90,
     },
     {
         "id": "pharmacy",
         "name": "30 店小药箱",
         "detail": "原来的 30 店日配，箱子较小，窗口是 8:00–20:00。",
         "seed": 7,
-        "time_limit_s": 50,
+        "time_limit_s": 90,
     },
 )
 
