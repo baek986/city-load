@@ -72,9 +72,13 @@ class RoadNetwork:
         j = max(-self.half_blocks, min(self.half_blocks, int(round(y_m / BLOCK_M))))
         return Intersection(i, j)
 
-    def _search(self, origin: Intersection) -> dict[Intersection, tuple[int, int]]:
-        """Map each reached intersection to (distance_m, travel_time_s) on the fastest path."""
+    def _search(self, origin: Intersection) -> tuple[dict[Intersection, tuple[int, int]], dict[Intersection, Intersection]]:
+        """Fastest paths from origin.
+
+        Reached values are (distance_m, travel_time_s). Parents rebuild the same path.
+        """
         best_time: dict[Intersection, tuple[int, int]] = {origin: (0, 0)}
+        parent: dict[Intersection, Intersection] = {}
         queue: list[tuple[int, int, int, Intersection]] = [(0, 0, 0, origin)]
         sequence = 0
         while queue:
@@ -87,22 +91,39 @@ class RoadNetwork:
                 if known is None or candidate < known:
                     sequence += 1
                     best_time[neighbor] = candidate
+                    parent[neighbor] = node
                     heapq.heappush(queue, (candidate[0], candidate[1], sequence, neighbor))
-        return {node: (distance, elapsed) for node, (elapsed, distance) in best_time.items()}
+        reached = {node: (distance, elapsed) for node, (elapsed, distance) in best_time.items()}
+        return reached, parent
 
     def fastest_path(self, origin: Intersection, dest: Intersection) -> tuple[int, int]:
         if origin == dest:
             return 0, 0
-        found = self._search(origin).get(dest)
+        found = self._search(origin)[0].get(dest)
         if found is None:
             raise ValueError(f"No road path from {origin} to {dest}")
         return found
+
+    def route_points(self, origin: Intersection, dest: Intersection) -> list[tuple[int, int]]:
+        """Intersection coordinates along the fastest path, including both ends."""
+        if origin == dest:
+            return [(origin.x_m, origin.y_m)]
+        _reached, parent = self._search(origin)
+        if dest not in parent and dest != origin:
+            raise ValueError(f"No road path from {origin} to {dest}")
+        points: list[tuple[int, int]] = []
+        node: Intersection | None = dest
+        while node is not None:
+            points.append((node.x_m, node.y_m))
+            node = parent.get(node)
+        points.reverse()
+        return points
 
     def travel_arcs(self, locations: list[tuple[str, float, float]]) -> list[TravelArc]:
         snapped = [(location_id, self.snap(x_m, y_m)) for location_id, x_m, y_m in locations]
         arcs: list[TravelArc] = []
         for from_id, origin in snapped:
-            reached = self._search(origin)
+            reached = self._search(origin)[0]
             for to_id, dest in snapped:
                 if from_id == to_id:
                     continue

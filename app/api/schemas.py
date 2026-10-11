@@ -14,6 +14,12 @@ class PlanCreate(BaseModel):
     time_limit_s: float = 180.0
 
 
+class DemoSolve(BaseModel):
+    scenario: str = "heavy"
+    seed: int = 3
+    time_limit_s: float = 50.0
+
+
 class ReplanCreate(BaseModel):
     locked_order_ids: list[str] = Field(default_factory=list)
     locked_vehicle_ids: list[str] = Field(default_factory=list)

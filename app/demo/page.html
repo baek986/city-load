@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配送演示</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #e7e5e4;
+      --paper: #f6f3ee;
+      --panel: #fffdf9;
+      --accent: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 16px;
+      align-items: flex-end;
+      padding: 16px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { font-size: 1.25rem; margin: 0; font-weight: 650; }
+    header p { margin: 4px 0 0; color: var(--muted); font-size: 0.92rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; align-items: flex-end; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; color: var(--muted); }
+    select, button {
+      font: inherit;
+      color: var(--ink);
+      background: white;
+      border: 1px solid #d6d3d1;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    select { min-width: 220px; }
+    button {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    .status { padding: 8px 20px 0; min-height: 1.4rem; color: var(--muted); font-size: 0.9rem; }
+    .status.error { color: #9f1239; }
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 20px 0;
+    }
+    .stat {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.82rem;
+    }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.9fr);
+      gap: 12px;
+      padding: 12px 20px 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 12px 14px 0;
+      font-size: 1rem;
+    }
+    .panel .hint { margin: 2px 14px 0; color: var(--muted); font-size: 0.8rem; }
+    canvas { width: 100%; height: 560px; display: block; touch-action: none; }
+    #map { background: #d7e8cc; }
+    .toolbar, .vehicles, .stops {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 14px 12px;
+      align-items: center;
+    }
+    .chip, .view-btn {
+      border: 1px solid #d6d3d1;
+      background: white;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.82rem;
+    }
+    .chip.active, .view-btn.active { border-color: var(--ink); font-weight: 650; }
+    .swatch { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+    .stops { color: var(--muted); font-size: 0.82rem; }
+    .slider { padding: 0 14px 12px; display: flex; gap: 8px; align-items: center; font-size: 0.82rem; color: var(--muted); }
+    input[type="range"] { flex: 1; }
+    #tip {
+      position: fixed;
+      z-index: 5;
+      pointer-events: none;
+      background: #1c1917;
+      color: white;
+      padding: 6px 8px;
+      border-radius: 8px;
+      font-size: 0.78rem;
+      display: none;
+      max-width: 220px;
+    }
+    @media (max-width: 960px) {
+      .workspace { grid-template-columns: 1fr; }
+      .controls { margin-left: 0; }
+      canvas { height: 420px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>配送演示</h1>
+      <p>左边是模拟路网上的行车路线，右边是同一辆车的车厢。颜色按车辆区分，车厢里的颜色按门店区分。</p>
+    </div>
+    <div class="controls">
+      <label>场景
+        <select id="scenario"></select>
+      </label>
+      <button id="run" type="button">生成方案</button>
+    </div>
+  </header>
+  <div id="status" class="status">选择场景后生成方案。30 店大约需要十几秒到半分钟。</div>
+  <div id="stats" class="stats"></div>
+  <div class="workspace">
+    <section class="panel">
+      <h2>路线</h2>
+      <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。</p>
+      <canvas id="map"></canvas>
+      <div id="vehicles" class="vehicles"></div>
+    </section>
+    <section class="panel">
+      <h2>装载</h2>
+      <p class="hint" id="cargo-hint">车门在近处。先卸的货靠近车门，后送的货在深处。斜线是易碎箱。</p>
+      <canvas id="cargo"></canvas>
+      <div class="toolbar">
+        <button class="view-btn active" type="button" data-view="iso">轴测</button>
+        <button class="view-btn" type="button" data-view="top">俯视</button>
+        <button class="view-btn" type="button" data-view="side">侧视</button>
+      </div>
+      <div class="slider">
+        <span id="progress-label">整车</span>
+        <input id="progress" type="range" min="0" value="0" disabled>
+      </div>
+      <div id="stops" class="stops"></div>
+    </section>
+  </div>
+  <div id="tip"></div>
+  <script>
+    const state = {
+      scenarios: [],
+      scene: null,
+      vehicleId: null,
+      view: "iso",
+      unloaded: 0,
+      mapHits: []
+    };
+
+    const mapCanvas = document.getElementById("map");
+    const cargoCanvas = document.getElementById("cargo");
+    const tip = document.getElementById("tip");
+
+    function clock(seconds) {
+      const value = Math.max(0, Math.round(seconds));
+      const hours = Math.floor(value / 3600);
+      const minutes = Math.floor((value % 3600) / 60);
+      return String(hours).padStart(2, "0") + ":" + String(minutes).padStart(2, "0");
+    }
+
+    function km(meters) {
+      return (meters / 1000).toFixed(1) + " km";
+    }
+
+    function minutes(seconds) {
+      return Math.round(seconds / 60) + " 分钟";
+    }
+
+    function shade(hex, factor) {
+      const number = parseInt(hex.slice(1), 16);
+      const channels = [number >> 16, (number >> 8) & 255, number & 255].map(function (channel) {
+        return Math.max(0, Math.min(255, Math.round(channel * factor)));
+      });
+      return "rgb(" + channels.join(",") + ")";
+    }
+
+    function prepare(canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.round(rect.width * ratio));
+      canvas.height = Math.max(1, Math.round(rect.height * ratio));
+      const context = canvas.getContext("2d");
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      return { context: context, width: rect.width, height: rect.height };
+    }
+
+    function selectedRoute() {
+      if (!state.scene) return null;
+      return state.scene.routes.find(function (route) { return route.vehicle_id === state.vehicleId; }) || state.scene.routes[0] || null;
+    }
+
+    function visiblePlacements(route) {
+      if (!route) return [];
+      const gone = new Set(route.stops.slice(0, state.unloaded).map(function (stop) { return stop.store_id; }));
+      return state.scene.placements.filter(function (item) {
+        return item.vehicle_id === route.vehicle_id && !gone.has(item.store_id);
+      });
+    }
+
+    function storeColor(route, storeId) {
+      const index = route.stops.findIndex(function (stop) { return stop.store_id === storeId; });
+      const palette = ["#9a3412", "#1d4ed8", "#166534", "#7e22ce", "#be123c", "#0f766e", "#b45309", "#1e3a8a", "#9f1239", "#115e59"];
+      return palette[(index < 0 ? 0 : index) % palette.length];
+    }
+
+    const PLACES = [
+      { i: -4, j: -1, w: 2, h: 2, name: "中心公园", kind: "park", category: "公园" },
+      { i: -2, j: 3, w: 1, h: 1, name: "市立医院", kind: "hospital", category: "医院" },
+      { i: -2, j: -3, w: 1, h: 1, name: "西岸小区", kind: "residential", category: "住宅" },
+      { i: 3, j: 2, w: 1, h: 1, name: "东岸市场", kind: "market", category: "市场" },
+      { i: 4, j: -2, w: 2, h: 1, name: "市第一中学", kind: "school", category: "学校" },
+      { i: 5, j: 4, w: 1, h: 1, name: "文化馆", kind: "civic", category: "公共建筑" },
+      { i: 5, j: -8, w: 1, h: 1, name: "社区卫生站", kind: "hospital", category: "医院" },
+      { i: 3, j: 5, w: 1, h: 2, name: "河东花园", kind: "residential", category: "住宅" },
+      { i: 6, j: -4, w: 1, h: 1, name: "南岸小区", kind: "residential", category: "住宅" },
+      { i: -6, j: 2, w: 1, h: 1, name: "西城小学", kind: "school", category: "学校" },
+      { i: 8, j: -8, w: 2, h: 2, name: "体育中心", kind: "stadium", category: "体育" },
+      { i: -10, j: 4, w: 2, h: 1, name: "政务中心", kind: "civic", category: "公共建筑" },
+      { i: 12, j: 6, w: 1, h: 1, name: "人民医院", kind: "hospital", category: "医院" },
+      { i: -12, j: -6, w: 2, h: 1, name: "实验小学", kind: "school", category: "学校" },
+      { i: 8, j: 10, w: 2, h: 2, name: "南郊公园", kind: "park", category: "公园" },
+      { i: -8, j: 12, w: 2, h: 2, name: "北郊公园", kind: "park", category: "公园" },
+      { i: 14, j: -2, w: 2, h: 1, name: "物流园区", kind: "industrial", category: "厂房" },
+      { i: -14, j: 2, w: 1, h: 1, name: "西城市场", kind: "market", category: "市场" }
+    ];
+
+    function mix(i, j) {
+      let n = Math.imul(i, 374761393) + Math.imul(j, 668265263);
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      return (n ^ (n >>> 16)) >>> 0;
+    }
+
+    function drawMap() {
+      const view = prepare(mapCanvas);
+      const context = view.context;
+      context.clearRect(0, 0, view.width, view.height);
+      state.mapHits = [];
+      const network = state.scene ? state.scene.network : {
+        block_m: 400,
+        half_blocks: 32,
+        river_x_m: 600,
+        bridge_y_m: 0,
+        arterial_every: 4
+      };
+      const locations = state.scene ? state.scene.locations : [];
+      let minX = -2400, minY = -2800, maxX = 4000, maxY = 3600;
+      if (locations.length) {
+        minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
+        locations.forEach(function (location) {
+          minX = Math.min(minX, location.x_m);
+          minY = Math.min(minY, location.y_m);
+          maxX = Math.max(maxX, location.x_m);
+          maxY = Math.max(maxY, location.y_m);
+        });
+        const padWorld = 1400;
+        minX -= padWorld; minY -= padWorld; maxX += padWorld; maxY += padWorld;
+      }
+      const pad = 18;
+      const scale = Math.min((view.width - pad * 2) / (maxX - minX), (view.height - pad * 2) / (maxY - minY));
+      const originX = pad + ((view.width - pad * 2) - (maxX - minX) * scale) / 2;
+      const originY = pad + ((view.height - pad * 2) - (maxY - minY) * scale) / 2;
+      function project(x, y) {
+        return [originX + (x - minX) * scale, originY + (maxY - y) * scale];
+      }
+      const block = network.block_m;
+      const limit = network.half_blocks * block;
+      const viewMinX = minX - originX / scale;
+      const viewMaxX = minX + (view.width - originX) / scale;
+      const viewMaxY = maxY + originY / scale;
+      const viewMinY = maxY - (view.height - originY) / scale;
+      const riverLeft = network.river_x_m - block / 2;
+      const riverRight = network.river_x_m + block / 2;
+      const riverI = Math.floor(network.river_x_m / block);
+      const font = "\"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif";
+      const labels = [];
+
+      function claim(x, y, w, h) {
+        const box = { x: x, y: y, w: w, h: h };
+        for (let index = 0; index < labels.length; index += 1) {
+          const other = labels[index];
+          if (box.x < other.x + other.w && box.x + box.w > other.x && box.y < other.y + other.h && box.y + box.h > other.y) return false;
+        }
+        labels.push(box);
+        return true;
+      }
+
+      function cellRect(i, j, wCells, hCells) {
+        const topLeft = project(i * block, (j + hCells) * block);
+        const bottomRight = project((i + wCells) * block, j * block);
+        return { x: topLeft[0], y: topLeft[1], w: bottomRight[0] - topLeft[0], h: bottomRight[1] - topLeft[1] };
+      }
+
+      function roundRect(x, y, w, h, r) {
+        const radius = Math.max(0, Math.min(r, Math.min(Math.abs(w), Math.abs(h)) / 2));
+        context.beginPath();
+        if (context.roundRect) context.roundRect(x, y, w, h, radius);
+        else context.rect(x, y, w, h);
+      }
+
+      function roadPx(arterial) {
+        const blockPx = block * scale;
+        if (arterial) return Math.max(3.4, Math.min(14, blockPx * 0.22));
+        return Math.max(1.6, Math.min(7, blockPx * 0.1));
+      }
+
+      function halo(text, x, y, fill, size, weight) {
+        context.font = (weight || "600") + " " + size + "px " + font;
+        context.lineWidth = 3.5;
+        context.strokeStyle = "rgba(255,253,249,0.92)";
+        context.lineJoin = "round";
+        context.strokeText(text, x, y);
+        context.fillStyle = fill;
+        context.fillText(text, x, y);
+      }
+
+      context.fillStyle = "#d7e8cc";
+      context.fillRect(0, 0, view.width, view.height);
+      const cityOrigin = project(-limit, limit);
+      const cityFar = project(limit, -limit);
+      context.fillStyle = "#e7f0e2";
+      context.fillRect(cityOrigin[0], cityOrigin[1], cityFar[0] - cityOrigin[0], cityFar[1] - cityOrigin[1]);
+
+      const reserved = new Set();
+      PLACES.forEach(function (place) {
+        for (let di = 0; di < place.w; di += 1) {
+          for (let dj = 0; dj < place.h; dj += 1) reserved.add((place.i + di) + "," + (place.j + dj));
+        }
+      });
+
+      const startI = Math.max(-network.half_blocks, Math.floor(viewMinX / block));
+      const endI = Math.min(network.half_blocks - 1, Math.ceil(viewMaxX / block));
+      const startJ = Math.max(-network.half_blocks, Math.floor(viewMinY / block));
+      const endJ = Math.min(network.half_blocks - 1, Math.ceil(viewMaxY / block));
+      const blockPx = block * scale;
+
+      for (let i = startI; i <= endI; i += 1) {
+        if (i === riverI) continue;
+        for (let j = startJ; j <= endJ; j += 1) {
+          if (reserved.has(i + "," + j)) continue;
+          const rect = cellRect(i, j, 1, 1);
+          const park = mix(i, j) % 13 === 0;
+          if (park) {
+            context.fillStyle = "#b7d39a";
+            roundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, 2);
+            context.fill();
+            if (blockPx >= 16) {
+              const seed = mix(i, j);
+              for (let tree = 0; tree < 3; tree += 1) {
+                const tx = rect.x + rect.w * (0.25 + ((seed >> tree) & 3) * 0.16);
+                const ty = rect.y + rect.h * (0.3 + ((seed >> (tree + 3)) & 3) * 0.16);
+                context.fillStyle = "#6ea34a";
+                context.beginPath();
+                context.arc(tx, ty, Math.max(1.4, blockPx * 0.06), 0, Math.PI * 2);
+                context.fill();
+              }
+            }
+            continue;
+          }
+          context.fillStyle = "rgb(" + (236 + (mix(i, j) % 10)) + "," + (230 + (mix(j, i) % 8)) + ",220)";
+          context.fillRect(rect.x, rect.y, rect.w, rect.h);
+          if (blockPx < 8) continue;
+          const seed = mix(i, j);
+          const inset = Math.max(1, roadPx(true) * 0.42);
+          const x = rect.x + inset;
+          const y = rect.y + inset;
+          const w = rect.w - inset * 2;
+          const h = rect.h - inset * 2;
+          if (w < 3 || h < 3) continue;
+          const rows = 2 + (seed % 2);
+          const gap = Math.max(0.5, Math.min(w, h) * 0.08);
+          const bw = (w - gap) / 2;
+          const bh = (h - gap * (rows - 1)) / rows;
+          const colors = ["#e6d5c0", "#d5dee8", "#ddd3c4", "#d7e0d4"];
+          for (let row = 0; row < rows; row += 1) {
+            for (let col = 0; col < 2; col += 1) {
+              if (rows > 2 && ((seed >> (row * 2 + col)) & 1) === 1) continue;
+              context.fillStyle = colors[(seed + row + col) % colors.length];
+              context.fillRect(x + col * (bw + gap), y + row * (bh + gap), bw, bh);
+            }
+          }
+        }
+      }
+
+      function drawPlace(place) {
+        const rect = cellRect(place.i, place.j, place.w, place.h);
+        if (rect.x > view.width || rect.y > view.height || rect.x + rect.w < 0 || rect.y + rect.h < 0) return;
+        const detail = Math.min(rect.w, rect.h) >= 26;
+        if (place.kind === "park") {
+          context.fillStyle = "#9fcf78";
+          roundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, 4);
+          context.fill();
+          context.fillStyle = "#c5e3a8";
+          roundRect(rect.x + rect.w * 0.18, rect.y + rect.h * 0.18, rect.w * 0.64, rect.h * 0.28, 3);
+          context.fill();
+          if (detail) {
+            [[0.28, 0.62], [0.48, 0.7], [0.68, 0.58], [0.38, 0.42], [0.72, 0.38]].forEach(function (spot) {
+              context.fillStyle = "#5f9a3e";
+              context.beginPath();
+              context.arc(rect.x + rect.w * spot[0], rect.y + rect.h * spot[1], Math.max(2, rect.w * 0.045), 0, Math.PI * 2);
+              context.fill();
+            });
+          }
+        } else if (place.kind === "hospital") {
+          context.fillStyle = "#f7f4ef";
+          roundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, 2);
+          context.fill();
+          context.fillStyle = "#ece7df";
+          context.fillRect(rect.x + rect.w * 0.12, rect.y + rect.h * 0.22, rect.w * 0.76, rect.h * 0.62);
+          const s = Math.min(rect.w, rect.h) * 0.28;
+          const cx = rect.x + rect.w * 0.5;
+          const cy = rect.y + rect.h * 0.52;
+          context.fillStyle = "#dc2626";
+          context.fillRect(cx - s * 0.16, cy - s * 0.46, s * 0.32, s * 0.92);
+          context.fillRect(cx - s * 0.46, cy - s * 0.16, s * 0.92, s * 0.32);
+        } else if (place.kind === "school") {
+          context.fillStyle = "#cfe3b4";
+          context.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+          context.fillStyle = "#f0e2cc";
+          context.fillRect(rect.x + rect.w * 0.08, rect.y + rect.h * 0.16, rect.w * 0.42, rect.h * 0.68);
+          context.fillStyle = "#d7c4a4";
+          context.fillRect(rect.x + rect.w * 0.08, rect.y + rect.h * 0.16, rect.w * 0.42, rect.h * 0.12);
+          context.strokeStyle = "#9a6b32";
+          context.lineWidth = 1;
+          context.beginPath();
+          context.moveTo(rect.x + rect.w * 0.62, rect.y + rect.h * 0.72);
+          context.lineTo(rect.x + rect.w * 0.62, rect.y + rect.h * 0.28);
+          context.stroke();
+          context.fillStyle = "#dc2626";
+          context.beginPath();
+          context.moveTo(rect.x + rect.w * 0.62, rect.y + rect.h * 0.28);
+          context.lineTo(rect.x + rect.w * 0.82, rect.y + rect.h * 0.36);
+          context.lineTo(rect.x + rect.w * 0.62, rect.y + rect.h * 0.44);
+          context.fill();
+        } else if (place.kind === "market") {
+          context.fillStyle = "#f6f0e4";
+          context.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+          for (let stall = 0; stall < 3; stall += 1) {
+            context.fillStyle = stall === 1 ? "#f4a261" : "#e76f51";
+            context.fillRect(rect.x + rect.w * (0.12 + stall * 0.28), rect.y + rect.h * 0.28, rect.w * 0.2, rect.h * 0.46);
+          }
+        } else if (place.kind === "residential") {
+          context.fillStyle = "#f3ecdf";
+          context.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+          const bars = place.h > 1 ? 4 : 3;
+          for (let bar = 0; bar < bars; bar += 1) {
+            context.fillStyle = bar % 2 ? "#d7c3a6" : "#c9d4e2";
+            const y = rect.y + rect.h * (0.14 + bar * (0.74 / bars));
+            context.fillRect(rect.x + rect.w * 0.14, y, rect.w * 0.72, rect.h * (0.5 / bars));
+          }
+        } else if (place.kind === "stadium") {
+          context.fillStyle = "#d9d3c8";
+          roundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, Math.min(rect.w, rect.h) * 0.2);
+          context.fill();
+          context.fillStyle = "#8fbf6a";
+          context.beginPath();
+          context.ellipse(rect.x + rect.w / 2, rect.y + rect.h / 2, rect.w * 0.28, rect.h * 0.22, 0, 0, Math.PI * 2);
+          context.fill();
+        } else if (place.kind === "industrial") {
+          context.fillStyle = "#e4e0d8";
+          context.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+          context.fillStyle = "#b9c0c7";
+          context.fillRect(rect.x + rect.w * 0.08, rect.y + rect.h * 0.22, rect.w * 0.5, rect.h * 0.56);
+          context.fillStyle = "#9aa3ab";
+          context.fillRect(rect.x + rect.w * 0.62, rect.y + rect.h * 0.34, rect.w * 0.28, rect.h * 0.44);
+        } else {
+          context.fillStyle = "#f4efe6";
+          context.fillRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+          context.fillStyle = "#e4d3b4";
+          context.fillRect(rect.x + rect.w * 0.16, rect.y + rect.h * 0.28, rect.w * 0.68, rect.h * 0.5);
+          context.fillStyle = "#c4b49a";
+          context.fillRect(rect.x + rect.w * 0.16, rect.y + rect.h * 0.28, rect.w * 0.68, rect.h * 0.12);
+        }
+        state.mapHits.push({
+          x: rect.x + rect.w / 2,
+          y: rect.y + rect.h / 2,
+          r: Math.max(12, Math.min(rect.w, rect.h) / 2),
+          location: { name: place.name, kind: "place", category: place.category }
+        });
+      }
+      PLACES.forEach(drawPlace);
+
+      const bank0 = project(riverLeft, viewMaxY);
+      const bank1 = project(riverRight, viewMinY);
+      context.fillStyle = "#b7d7a4";
+      context.fillRect(bank0[0], 0, bank1[0] - bank0[0], view.height);
+      const waterInset = block * 0.14;
+      const water0 = project(riverLeft + waterInset, viewMaxY);
+      const water1 = project(riverRight - waterInset, viewMinY);
+      const water = context.createLinearGradient(water0[0], 0, water1[0], 0);
+      water.addColorStop(0, "#2f86ad");
+      water.addColorStop(0.18, "#7ec4e0");
+      water.addColorStop(0.5, "#d5f1fb");
+      water.addColorStop(0.82, "#7ec4e0");
+      water.addColorStop(1, "#2f86ad");
+      context.fillStyle = water;
+      context.fillRect(water0[0], 0, water1[0] - water0[0], view.height);
+      context.strokeStyle = "rgba(255,255,255,0.45)";
+      context.lineWidth = 1;
+      const bridgeTop = project(0, network.bridge_y_m + 70)[1];
+      const bridgeBottom = project(0, network.bridge_y_m - 70)[1];
+      for (let band = 0; band < 7; band += 1) {
+        const y = 24 + band * (view.height / 7);
+        if (y > Math.min(bridgeTop, bridgeBottom) - 8 && y < Math.max(bridgeTop, bridgeBottom) + 8) continue;
+        context.beginPath();
+        context.moveTo(water0[0] + 6, y);
+        context.lineTo(water0[0] + (water1[0] - water0[0]) * 0.42, y);
+        context.stroke();
+      }
+
+      function strokeRoad(x1, y1, x2, y2, arterial) {
+        const width = roadPx(arterial);
+        context.lineCap = "butt";
+        context.strokeStyle = arterial ? "#e4c15a" : "#d5cdc0";
+        context.lineWidth = width + (arterial ? 1.5 : 1);
+        context.beginPath();
+        context.moveTo(x1, y1);
+        context.lineTo(x2, y2);
+        context.stroke();
+        context.strokeStyle = arterial ? "#f6e3a1" : "#fffcf7";
+        context.lineWidth = width;
+        context.beginPath();
+        context.moveTo(x1, y1);
+        context.lineTo(x2, y2);
+        context.stroke();
+      }
+
+      const gridTop = project(0, Math.min(limit, viewMaxY))[1];
+      const gridBottom = project(0, Math.max(-limit, viewMinY))[1];
+      const gridLeft = project(Math.max(-limit, viewMinX), 0)[0];
+      const gridRight = project(Math.min(limit, viewMaxX), 0)[0];
+      const riverScreenL = project(riverLeft, 0)[0];
+      const riverScreenR = project(riverRight, 0)[0];
+      for (let i = Math.ceil(Math.max(-limit, viewMinX) / block); i <= Math.floor(Math.min(limit, viewMaxX) / block); i += 1) {
+        const x = project(i * block, 0)[0];
+        strokeRoad(x, gridTop, x, gridBottom, i % network.arterial_every === 0);
+      }
+      for (let j = Math.ceil(Math.max(-limit, viewMinY) / block); j <= Math.floor(Math.min(limit, viewMaxY) / block); j += 1) {
+        const y = project(0, j * block)[1];
+        const arterial = j % network.arterial_every === 0;
+        if (j * block === network.bridge_y_m) strokeRoad(gridLeft, y, gridRight, y, true);
+        else {
+          strokeRoad(gridLeft, y, riverScreenL, y, arterial);
+          strokeRoad(riverScreenR, y, gridRight, y, arterial);
+        }
+      }
+
+      const deckTop = project(riverLeft - 20, network.bridge_y_m + 36);
+      const deckBottom = project(riverRight + 20, network.bridge_y_m - 36);
+      let deckX = deckTop[0];
+      let deckY = deckTop[1];
+      let deckW = deckBottom[0] - deckTop[0];
+      let deckH = deckBottom[1] - deckTop[1];
+      if (deckH < 10) {
+        const mid = deckY + deckH / 2;
+        deckY = mid - 5;
+        deckH = 10;
+      }
+      context.fillStyle = "rgba(36, 64, 82, 0.28)";
+      context.fillRect(deckX, deckY + 3, deckW, deckH);
+      const deck = context.createLinearGradient(deckX, deckY, deckX, deckY + deckH);
+      deck.addColorStop(0, "#f7f4ee");
+      deck.addColorStop(0.2, "#d9d2c6");
+      deck.addColorStop(0.5, "#cfc6b8");
+      deck.addColorStop(1, "#b7aea0");
+      context.fillStyle = deck;
+      context.fillRect(deckX, deckY, deckW, deckH);
+      context.strokeStyle = "#6f675e";
+      context.lineWidth = 1.2;
+      context.beginPath();
+      context.moveTo(deckX, deckY + 1.2);
+      context.lineTo(deckX + deckW, deckY + 1.2);
+      context.moveTo(deckX, deckY + deckH - 1.2);
+      context.lineTo(deckX + deckW, deckY + deckH - 1.2);
+      context.stroke();
+
+      function screenRoute(route, shift) {
+        const raw = [];
+        route.legs.forEach(function (leg) {
+          leg.points.forEach(function (point) {
+            const projected = project(point[0], point[1]);
+            const last = raw[raw.length - 1];
+            if (last && Math.hypot(last[0] - projected[0], last[1] - projected[1]) < 0.5) return;
+            raw.push(projected);
+          });
+        });
+        if (!shift || raw.length < 2) return raw;
+        const normals = [];
+        for (let index = 0; index < raw.length - 1; index += 1) {
+          const dx = raw[index + 1][0] - raw[index][0];
+          const dy = raw[index + 1][1] - raw[index][1];
+          const length = Math.hypot(dx, dy) || 1;
+          normals.push([dy / length, -dx / length]);
+        }
+        return raw.map(function (point, index) {
+          const before = normals[Math.max(0, index - 1)];
+          const after = normals[Math.min(normals.length - 1, index)];
+          const nx = before[0] + after[0];
+          const ny = before[1] + after[1];
+          const length = Math.hypot(nx, ny) || 1;
+          const miter = Math.min(shift * 1.7, shift * 2 / length);
+          return [point[0] + nx / length * miter, point[1] + ny / length * miter];
+        });
+      }
+
+      function strokePoints(points) {
+        context.beginPath();
+        points.forEach(function (point, index) {
+          if (index === 0) context.moveTo(point[0], point[1]);
+          else context.lineTo(point[0], point[1]);
+        });
+      }
+
+      let activePoints = [];
+      let activeColor = "#b45309";
+      if (state.scene) {
+        state.scene.routes.forEach(function (route) {
+          if (route.vehicle_id === state.vehicleId) return;
+          const points = screenRoute(route, 0);
+          if (points.length < 2) return;
+          context.lineJoin = "round";
+          context.lineCap = "round";
+          context.globalAlpha = 0.22;
+          strokePoints(points);
+          context.strokeStyle = route.color;
+          context.lineWidth = 2;
+          context.stroke();
+          context.globalAlpha = 1;
+        });
+        const active = state.scene.routes.find(function (route) { return route.vehicle_id === state.vehicleId; }) || state.scene.routes[0];
+        if (active) {
+          activeColor = active.color;
+          activePoints = screenRoute(active, Math.max(4.5, Math.min(7, block * scale * 0.28)));
+          if (activePoints.length >= 2) {
+            context.lineJoin = "round";
+            context.lineCap = "round";
+            strokePoints(activePoints);
+            context.strokeStyle = "rgba(28,25,23,0.72)";
+            context.lineWidth = 11;
+            context.stroke();
+            context.strokeStyle = "#fffdf9";
+            context.lineWidth = 8;
+            context.stroke();
+            context.strokeStyle = active.color;
+            context.lineWidth = 5;
+            context.stroke();
+          }
+        }
+      }
+
+      const legendW = 168;
+      const legendH = 78;
+      const legendX = 10;
+      const legendY = view.height - legendH - 10;
+      claim(legendX, legendY, legendW, legendH);
+      claim(view.width - 46, 8, 38, 52);
+
+      function placeName(place) {
+        const rect = cellRect(place.i, place.j, place.w, place.h);
+        if (rect.x > view.width || rect.y > view.height || rect.x + rect.w < 0 || rect.y + rect.h < 0) return;
+        const size = rect.w > 90 ? 13 : 11;
+        context.font = "600 " + size + "px " + font;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        const width = context.measureText(place.name).width + 6;
+        let x = rect.x + rect.w / 2;
+        let y = rect.y + rect.h / 2;
+        if (rect.h < 18) y = rect.y + rect.h + 8;
+        if (!claim(x - width / 2, y - 8, width, 16)) return;
+        const ink = place.kind === "hospital" ? "#9f1239" : place.kind === "park" ? "#14532d" : "#292524";
+        halo(place.name, x, y, ink, size, "600");
+      }
+
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.font = "700 13px " + font;
+      const roadY = project(0, network.bridge_y_m)[1];
+      const bridgeLabelW = context.measureText("清河桥").width + 8;
+      const bridgeLabelX = deckX + deckW / 2;
+      const bridgeLabelY = roadY - 22;
+      if (claim(bridgeLabelX - bridgeLabelW / 2, bridgeLabelY - 8, bridgeLabelW, 16)) {
+        halo("清河桥", bridgeLabelX, bridgeLabelY, "#3f3a34", 13, "700");
+      }
+      const riverLabelX = (water0[0] + water1[0]) / 2;
+      const riverLabelY = roadY - 100;
+      if (riverLabelY > 24 && riverLabelY < view.height - 24) {
+        context.save();
+        context.translate(riverLabelX, riverLabelY);
+        context.rotate(-Math.PI / 2);
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        if (claim(riverLabelX - 8, riverLabelY - 20, 16, 40)) halo("清河", 0, 0, "#075985", 14, "700");
+        context.restore();
+      }
+
+      const chosen = state.scene ? (state.scene.routes.find(function (route) { return route.vehicle_id === state.vehicleId; }) || state.scene.routes[0]) : null;
+      const sequenceOf = {};
+      if (chosen) chosen.stops.forEach(function (stop) { sequenceOf[stop.store_id] = stop.sequence; });
+
+      function chip(text, x, y, color) {
+        context.font = "12px " + font;
+        context.textAlign = "left";
+        context.textBaseline = "middle";
+        const w = context.measureText(text).width + 10;
+        const h = 16;
+        const spots = [[x + 14, y - 20], [x + 14, y + 8], [x - w - 12, y - 20], [x - w - 12, y + 8]];
+        for (let index = 0; index < spots.length; index += 1) {
+          const spot = spots[index];
+          if (spot[0] < 4 || spot[1] < 4 || spot[0] + w > view.width - 4) continue;
+          if (!claim(spot[0], spot[1], w, h)) continue;
+          context.fillStyle = "rgba(255,253,249,0.94)";
+          roundRect(spot[0], spot[1], w, h, 4);
+          context.fill();
+          context.lineWidth = 1;
+          context.strokeStyle = "rgba(28,25,23,0.12)";
+          context.stroke();
+          context.fillStyle = color || "#1c1917";
+          context.fillText(text, spot[0] + 5, spot[1] + h / 2);
+          return;
+        }
+      }
+
+      locations.forEach(function (location) {
+        const projected = project(location.x_m, location.y_m);
+        const onRoute = location.kind === "depot" || sequenceOf[location.id] != null;
+        claim(projected[0] - 8, projected[1] - 8, 16, 16);
+        if (location.kind === "depot") {
+          context.fillStyle = "#44403c";
+          context.fillRect(projected[0] - 7, projected[1] - 5, 14, 10);
+          context.fillStyle = "#292524";
+          context.beginPath();
+          context.moveTo(projected[0] - 9, projected[1] - 5);
+          context.lineTo(projected[0], projected[1] - 11);
+          context.lineTo(projected[0] + 9, projected[1] - 5);
+          context.fill();
+          chip(location.name, projected[0], projected[1], "#1c1917");
+        } else {
+          const radius = onRoute ? 8 : 5;
+          context.beginPath();
+          context.fillStyle = location.color || "#78716c";
+          context.arc(projected[0], projected[1], radius, 0, Math.PI * 2);
+          context.fill();
+          context.lineWidth = 2;
+          context.strokeStyle = "white";
+          context.stroke();
+          if (sequenceOf[location.id] != null) {
+            context.fillStyle = "white";
+            context.font = "700 9px " + font;
+            context.textAlign = "center";
+            context.textBaseline = "middle";
+            context.fillText(String(sequenceOf[location.id]), projected[0], projected[1] + 0.5);
+          }
+          if (sequenceOf[location.id] != null || locations.length <= 8) chip(location.name, projected[0], projected[1], "#1c1917");
+        }
+        state.mapHits.push({ x: projected[0], y: projected[1], r: 12, location: location });
+      });
+
+      PLACES.forEach(placeName);
+
+      function streetName(axis, index) {
+        const cn = ["", "一", "二", "三", "四", "五", "六", "七", "八"];
+        if (axis === "x") {
+          if (index === 0) return "中轴大道";
+          if (index === 1) return "西滨河路";
+          if (index === 2) return "东滨河路";
+          if (index % network.arterial_every !== 0) return "";
+          const n = Math.abs(index) / network.arterial_every;
+          return (index > 0 ? "东" : "西") + (cn[n] || n) + "大街";
+        }
+        if (index === 0) return "滨河路";
+        if (index % network.arterial_every !== 0) return "";
+        const n = Math.abs(index) / network.arterial_every;
+        return (index > 0 ? "北" : "南") + (cn[n] || n) + "大街";
+      }
+
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      for (let i = Math.ceil(Math.max(-limit, viewMinX) / block); i <= Math.floor(Math.min(limit, viewMaxX) / block); i += 1) {
+        const name = streetName("x", i);
+        if (!name) continue;
+        context.font = "11px " + font;
+        const w = context.measureText(name).width + 4;
+        if (i === 1 || i === 2) {
+          const x = project((i === 1 ? 0.5 : 2.5) * block, 0)[0];
+          const y = roadY + 78;
+          if (!claim(x - 8, y - w / 2, 16, w)) continue;
+          context.save();
+          context.translate(x, y);
+          context.rotate(-Math.PI / 2);
+          halo(name, 0, 0, "#57534e", 11, "500");
+          context.restore();
+          continue;
+        }
+        const x = project(i * block, 0)[0] + 12;
+        const y = view.height * 0.22;
+        if (!claim(x - 8, y - w / 2, 16, w)) continue;
+        context.save();
+        context.translate(x, y);
+        context.rotate(-Math.PI / 2);
+        halo(name, 0, 0, "#57534e", 11, "500");
+        context.restore();
+      }
+      for (let j = Math.ceil(Math.max(-limit, viewMinY) / block); j <= Math.floor(Math.min(limit, viewMaxY) / block); j += 1) {
+        const name = streetName("y", j);
+        if (!name) continue;
+        const y = project(0, j * block)[1] - 9;
+        const x = j === 0 ? project(riverLeft - block * 1.6, 0)[0] : view.width * 0.72;
+        context.font = "11px " + font;
+        const w = context.measureText(name).width + 4;
+        if (!claim(x - w / 2, y - 8, w, 16)) continue;
+        halo(name, x, y, "#57534e", 11, "500");
+      }
+
+      const suburb = project(-limit, 0)[0];
+      if (suburb > 36) {
+        context.textAlign = "left";
+        context.font = "12px " + font;
+        if (claim(8, 8, 36, 16)) halo("郊区", 22, 16, "#3f6212", 12, "600");
+      }
+
+      if (activePoints.length >= 2) {
+        const spacing = 62;
+        let carried = spacing * 0.45;
+        context.lineJoin = "round";
+        for (let index = 1; index < activePoints.length; index += 1) {
+          const x0 = activePoints[index - 1][0];
+          const y0 = activePoints[index - 1][1];
+          const x1 = activePoints[index][0];
+          const y1 = activePoints[index][1];
+          const dx = x1 - x0;
+          const dy = y1 - y0;
+          const length = Math.hypot(dx, dy);
+          if (length < 1) continue;
+          let walked = 0;
+          while (carried + (length - walked) >= spacing) {
+            const need = spacing - carried;
+            walked += need;
+            carried = 0;
+            const t = walked / length;
+            const x = x0 + dx * t;
+            const y = y0 + dy * t;
+            let covered = false;
+            for (let box = 0; box < labels.length; box += 1) {
+              const label = labels[box];
+              if (x > label.x - 6 && x < label.x + label.w + 6 && y > label.y - 6 && y < label.y + label.h + 6) {
+                covered = true;
+                break;
+              }
+            }
+            if (covered) continue;
+            context.save();
+            context.translate(x, y);
+            context.rotate(Math.atan2(dy, dx));
+            context.beginPath();
+            context.moveTo(8, 0);
+            context.lineTo(-6, 4.5);
+            context.lineTo(-2.5, 0);
+            context.lineTo(-6, -4.5);
+            context.closePath();
+            context.fillStyle = "#fffdf9";
+            context.fill();
+            context.lineWidth = 1.5;
+            context.strokeStyle = activeColor;
+            context.stroke();
+            context.restore();
+          }
+          carried += length - walked;
+        }
+        locations.forEach(function (location) {
+          const projected = project(location.x_m, location.y_m);
+          const onRoute = location.kind === "depot" || sequenceOf[location.id] != null;
+          if (location.kind === "depot") {
+            context.fillStyle = "#44403c";
+            context.fillRect(projected[0] - 7, projected[1] - 5, 14, 10);
+            context.fillStyle = "#292524";
+            context.beginPath();
+            context.moveTo(projected[0] - 9, projected[1] - 5);
+            context.lineTo(projected[0], projected[1] - 11);
+            context.lineTo(projected[0] + 9, projected[1] - 5);
+            context.fill();
+          } else {
+            context.beginPath();
+            context.fillStyle = location.color || "#78716c";
+            context.arc(projected[0], projected[1], onRoute ? 8 : 5, 0, Math.PI * 2);
+            context.fill();
+            context.lineWidth = 2;
+            context.strokeStyle = "white";
+            context.stroke();
+            if (sequenceOf[location.id] != null) {
+              context.fillStyle = "white";
+              context.font = "700 9px " + font;
+              context.textAlign = "center";
+              context.textBaseline = "middle";
+              context.fillText(String(sequenceOf[location.id]), projected[0], projected[1] + 0.5);
+            }
+          }
+        });
+      }
+
+      context.fillStyle = "rgba(255,253,249,0.92)";
+      roundRect(legendX, legendY, legendW, legendH, 8);
+      context.fill();
+      context.lineWidth = 1;
+      context.strokeStyle = "rgba(28,25,23,0.08)";
+      context.stroke();
+      let meters = 2000;
+      let barPx = meters * scale;
+      if (barPx > 120) { meters = 1000; barPx = meters * scale; }
+      if (barPx < 46) { meters = 5000; barPx = meters * scale; }
+      const barLabel = meters >= 1000 ? (meters / 1000) + " km" : meters + " m";
+      context.strokeStyle = "#1c1917";
+      context.lineWidth = 2;
+      context.beginPath();
+      context.moveTo(legendX + 12, legendY + 16);
+      context.lineTo(legendX + 12 + barPx, legendY + 16);
+      context.stroke();
+      context.fillStyle = "#1c1917";
+      context.textAlign = "left";
+      context.textBaseline = "alphabetic";
+      context.font = "11px " + font;
+      context.fillText(barLabel, legendX + 12, legendY + 12);
+      const legendItems = [["#5eb0d4", "清河"], ["#d9d2c6", "清河桥"], ["#8fbf6a", "公园"], ["#f6e3a1", "主干道"], ["#dc2626", "医院"], ["#e76f51", "市场"]];
+      legendItems.forEach(function (item, index) {
+        const col = index < 3 ? 0 : 1;
+        const row = index % 3;
+        const x = legendX + 12 + col * 78;
+        const y = legendY + 32 + row * 14;
+        context.fillStyle = item[0];
+        context.fillRect(x, y - 7, 10, 8);
+        context.fillStyle = "#44403c";
+        context.font = "11px " + font;
+        context.fillText(item[1], x + 14, y);
+      });
+
+      context.save();
+      context.translate(view.width - 26, 28);
+      context.fillStyle = "#1c1917";
+      context.beginPath();
+      context.moveTo(0, -12);
+      context.lineTo(5, 2);
+      context.lineTo(0, -1);
+      context.lineTo(-5, 2);
+      context.closePath();
+      context.fill();
+      context.font = "600 11px " + font;
+      context.textAlign = "center";
+      context.textBaseline = "alphabetic";
+      context.fillText("北", 0, 16);
+      context.restore();
+
+      if (!state.scene) {
+        context.fillStyle = "rgba(255,253,249,0.92)";
+        roundRect(view.width / 2 - 150, 16, 300, 28, 8);
+        context.fill();
+        context.fillStyle = "#57534e";
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.font = "13px " + font;
+        context.fillText("生成方案后，路线会画在这张城区图上。", view.width / 2, 30);
+      }
+    }
+
+    function projectBox(mode, x, y, z) {
+      if (mode === "top") return { x: x, y: y };
+      if (mode === "side") return { x: x, y: -z };
+      const cos = Math.cos(Math.PI / 6);
+      const sin = Math.sin(Math.PI / 6);
+      return { x: (x - y) * cos, y: (x + y) * sin - z };
+    }
+
+    function drawCargo() {
+      const view = prepare(cargoCanvas);
+      const context = view.context;
+      context.clearRect(0, 0, view.width, view.height);
+      const route = selectedRoute();
+      if (!route) {
+        context.fillStyle = "#78716c";
+        context.font = "16px sans-serif";
+        context.fillText("生成方案后，这里显示选中车辆的车厢。", 24, 40);
+        return;
+      }
+      const length = route.length_mm;
+      const width = route.width_mm;
+      const height = route.height_mm;
+      const corners = [];
+      [0, length].forEach(function (x) {
+        [0, width].forEach(function (y) {
+          [0, height].forEach(function (z) {
+            corners.push(projectBox(state.view, x, y, z));
+          });
+        });
+      });
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      corners.forEach(function (corner) {
+        minX = Math.min(minX, corner.x); minY = Math.min(minY, corner.y);
+        maxX = Math.max(maxX, corner.x); maxY = Math.max(maxY, corner.y);
+      });
+      const pad = 36;
+      const scale = Math.min((view.width - pad * 2) / (maxX - minX || 1), (view.height - pad * 2) / (maxY - minY || 1));
+      const offsetX = pad + ((view.width - pad * 2) - (maxX - minX) * scale) / 2 - minX * scale;
+      const offsetY = pad + ((view.height - pad * 2) - (maxY - minY) * scale) / 2 - minY * scale;
+      function toScreen(point) {
+        return [offsetX + point.x * scale, offsetY + point.y * scale];
+      }
+      function face(points, color) {
+        context.beginPath();
+        points.forEach(function (point, index) {
+          const screen = toScreen(point);
+          if (index === 0) context.moveTo(screen[0], screen[1]);
+          else context.lineTo(screen[0], screen[1]);
+        });
+        context.closePath();
+        context.fillStyle = color;
+        context.fill();
+        context.strokeStyle = "rgba(28,25,23,0.35)";
+        context.lineWidth = 1;
+        context.stroke();
+      }
+      function wire() {
+        const edges = [
+          [0, 0, 0, length, 0, 0], [0, width, 0, length, width, 0],
+          [0, 0, height, length, 0, height], [0, width, height, length, width, height],
+          [0, 0, 0, 0, width, 0], [length, 0, 0, length, width, 0],
+          [0, 0, height, 0, width, height], [length, 0, height, length, width, height],
+          [0, 0, 0, 0, 0, height], [length, 0, 0, length, 0, height],
+          [0, width, 0, 0, width, height], [length, width, 0, length, width, height]
+        ];
+        context.strokeStyle = "rgba(28,25,23,0.45)";
+        context.lineWidth = 1.2;
+        edges.forEach(function (edge) {
+          const start = toScreen(projectBox(state.view, edge[0], edge[1], edge[2]));
+          const end = toScreen(projectBox(state.view, edge[3], edge[4], edge[5]));
+          context.beginPath();
+          context.moveTo(start[0], start[1]);
+          context.lineTo(end[0], end[1]);
+          context.stroke();
+        });
+      }
+      const boxes = visiblePlacements(route).slice().sort(function (left, right) {
+        if (state.view === "top") return left.z - right.z;
+        if (state.view === "side") return right.y - left.y;
+        return (right.x + right.y) - (left.x + left.y) || left.z - right.z;
+      });
+      if (state.view !== "iso") wire();
+      boxes.forEach(function (box) {
+        const color = storeColor(route, box.store_id);
+        const x = box.x, y = box.y, z = box.z, dx = box.dx, dy = box.dy, dz = box.dz;
+        if (state.view === "top") {
+          face([
+            projectBox(state.view, x, y, z),
+            projectBox(state.view, x + dx, y, z),
+            projectBox(state.view, x + dx, y + dy, z),
+            projectBox(state.view, x, y + dy, z)
+          ], color);
+        } else if (state.view === "side") {
+          face([
+            projectBox(state.view, x, y, z),
+            projectBox(state.view, x + dx, y, z),
+            projectBox(state.view, x + dx, y, z + dz),
+            projectBox(state.view, x, y, z + dz)
+          ], color);
+        } else {
+          face([
+            projectBox(state.view, x, y, z),
+            projectBox(state.view, x + dx, y, z),
+            projectBox(state.view, x + dx, y, z + dz),
+            projectBox(state.view, x, y, z + dz)
+          ], shade(color, 0.62));
+          face([
+            projectBox(state.view, x, y, z),
+            projectBox(state.view, x, y + dy, z),
+            projectBox(state.view, x, y + dy, z + dz),
+            projectBox(state.view, x, y, z + dz)
+          ], shade(color, 0.8));
+          face([
+            projectBox(state.view, x, y, z + dz),
+            projectBox(state.view, x + dx, y, z + dz),
+            projectBox(state.view, x + dx, y + dy, z + dz),
+            projectBox(state.view, x, y + dy, z + dz)
+          ], color);
+        }
+        if (box.fragile) {
+          const screen = toScreen(projectBox(state.view, x + dx * 0.2, y + dy * 0.2, z + dz));
+          const screen2 = toScreen(projectBox(state.view, x + dx * 0.8, y + dy * 0.8, z + dz));
+          context.beginPath();
+          context.strokeStyle = "rgba(255,255,255,0.8)";
+          context.moveTo(screen[0], screen[1]);
+          context.lineTo(screen2[0], screen2[1]);
+          context.stroke();
+        }
+      });
+      if (state.view === "iso") wire();
+      const door = toScreen(projectBox(state.view, 0, width / 2, state.view === "top" ? 0 : height * 0.15));
+      context.fillStyle = "#1c1917";
+      context.font = "13px sans-serif";
+      context.fillText("车门", door[0] - 28, door[1]);
+      context.font = "12px sans-serif";
+      context.fillStyle = "#57534e";
+      const caption = "车厢 " + length + " × " + width + " × " + height + " mm";
+      context.fillText(caption, 16, view.height - 16);
+    }
+
+    function renderVehicles() {
+      const host = document.getElementById("vehicles");
+      host.innerHTML = "";
+      if (!state.scene) return;
+      state.scene.routes.forEach(function (route) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "chip" + (route.vehicle_id === state.vehicleId ? " active" : "");
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = route.color;
+        button.appendChild(swatch);
+        button.appendChild(document.createTextNode(route.vehicle_id + " · " + route.stops.length + " 站 · " + km(route.distance_m)));
+        button.addEventListener("click", function () {
+          state.vehicleId = route.vehicle_id;
+          state.unloaded = 0;
+          syncProgress();
+          draw();
+          renderVehicles();
+          renderStops();
+        });
+        host.appendChild(button);
+      });
+    }
+
+    function renderStops() {
+      const host = document.getElementById("stops");
+      host.innerHTML = "";
+      const route = selectedRoute();
+      if (!route) return;
+      route.stops.forEach(function (stop) {
+        const item = document.createElement("span");
+        const dot = document.createElement("span");
+        dot.className = "swatch";
+        dot.style.background = storeColor(route, stop.store_id);
+        item.appendChild(dot);
+        item.appendChild(document.createTextNode(stop.sequence + ". " + stop.name + " " + clock(stop.arrival_s)));
+        host.appendChild(item);
+      });
+    }
+
+    function syncProgress() {
+      const route = selectedRoute();
+      const slider = document.getElementById("progress");
+      const label = document.getElementById("progress-label");
+      if (!route) {
+        slider.disabled = true;
+        slider.value = "0";
+        label.textContent = "整车";
+        return;
+      }
+      slider.disabled = false;
+      slider.max = String(route.stops.length);
+      slider.value = String(state.unloaded);
+      if (state.unloaded === 0) label.textContent = "刚装满，尚未卸货";
+      else if (state.unloaded >= route.stops.length) label.textContent = "已全部卸完";
+      else label.textContent = "已卸 " + state.unloaded + " 家，还剩 " + (route.stops.length - state.unloaded) + " 家";
+    }
+
+    function renderStats() {
+      const host = document.getElementById("stats");
+      host.innerHTML = "";
+      if (!state.scene) return;
+      const summary = state.scene.summary;
+      const bits = [
+        summary.store_count + " 家店",
+        summary.used_vehicle_count + " 辆车",
+        "准时率 " + Math.round(summary.on_time_rate * 100) + "%",
+        "拆单 " + summary.split_order_count,
+        summary.proven_optimal ? "已证明最优" : "间隙 " + (summary.gap == null ? "—" : Number(summary.gap).toFixed(2))
+      ];
+      bits.forEach(function (text) {
+        const item = document.createElement("span");
+        item.className = "stat";
+        item.textContent = text;
+        host.appendChild(item);
+      });
+    }
+
+    function draw() {
+      drawMap();
+      drawCargo();
+      syncProgress();
+    }
+
+    document.getElementById("progress").addEventListener("input", function (event) {
+      state.unloaded = Number(event.target.value);
+      drawCargo();
+      syncProgress();
+    });
+
+    document.querySelectorAll(".view-btn").forEach(function (button) {
+      button.addEventListener("click", function () {
+        state.view = button.dataset.view;
+        document.querySelectorAll(".view-btn").forEach(function (item) { item.classList.toggle("active", item === button); });
+        drawCargo();
+      });
+    });
+
+    mapCanvas.addEventListener("mousemove", function (event) {
+      const rect = mapCanvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      let hit = null;
+      for (let index = state.mapHits.length - 1; index >= 0; index -= 1) {
+        const item = state.mapHits[index];
+        if (Math.hypot(item.x - x, item.y - y) <= (item.r || 10)) {
+          hit = item;
+          break;
+        }
+      }
+      if (!hit) {
+        tip.style.display = "none";
+        return;
+      }
+      const location = hit.location;
+      tip.style.display = "block";
+      tip.style.left = (event.clientX + 12) + "px";
+      tip.style.top = (event.clientY + 12) + "px";
+      if (location.kind === "place") tip.textContent = location.name + " · " + location.category;
+      else if (location.kind === "depot") tip.textContent = location.name + " · 仓库";
+      else tip.textContent = location.name + (location.window_open_s != null ? "  " + clock(location.window_open_s) + "–" + clock(location.window_close_s) : "");
+    });
+    mapCanvas.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+
+    async function loadScenarios() {
+      const response = await fetch("/v1/demo/scenarios");
+      const body = await response.json();
+      state.scenarios = body.scenarios;
+      const select = document.getElementById("scenario");
+      body.scenarios.forEach(function (scenario) {
+        const option = document.createElement("option");
+        option.value = scenario.id;
+        option.textContent = scenario.name;
+        if (scenario.id === "heavy") option.selected = true;
+        select.appendChild(option);
+      });
+      select.addEventListener("change", function () {
+        const chosen = state.scenarios.find(function (item) { return item.id === select.value; });
+        if (chosen && !state.scene) {
+          document.getElementById("status").textContent = chosen.detail;
+        }
+      });
+    }
+
+    document.getElementById("run").addEventListener("click", async function () {
+      const button = document.getElementById("run");
+      const status = document.getElementById("status");
+      const select = document.getElementById("scenario");
+      const scenario = state.scenarios.find(function (item) { return item.id === select.value; });
+      button.disabled = true;
+      status.className = "status";
+      status.textContent = "正在一起规划路线和装载…";
+      const started = performance.now();
+      try {
+        const response = await fetch("/v1/demo/solve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scenario: scenario.id,
+            seed: scenario.seed,
+            time_limit_s: scenario.time_limit_s
+          })
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          const detail = body.detail && body.detail.message ? body.detail.message : "规划没有得到可行方案";
+          throw new Error(detail);
+        }
+        state.scene = body;
+        state.vehicleId = body.routes.length ? body.routes[0].vehicle_id : null;
+        state.unloaded = 0;
+        const seconds = ((performance.now() - started) / 1000).toFixed(1);
+        status.textContent = body.scenario.name + " 已生成，用时 " + seconds + " 秒。点击车辆可以切换路线和车厢。";
+        renderStats();
+        renderVehicles();
+        renderStops();
+        draw();
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    window.addEventListener("resize", draw);
+    loadScenarios().then(draw).catch(function () {
+      document.getElementById("status").textContent = "场景列表读取失败。";
+    });
+  </script>
+</body>
+</html>

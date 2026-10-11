@@ -13,6 +13,20 @@ def test_adjacent_intersections_use_the_street_length() -> None:
     assert travel_time_s == max(int(round(BLOCK_M / 8)), 1)
 
 
+def test_river_path_crosses_the_bridge() -> None:
+    network = RoadNetwork()
+    origin = Intersection(0, 4)
+    dest = Intersection(4, 4)
+    points = network.route_points(origin, dest)
+    distance_m, _travel_time_s = network.fastest_path(origin, dest)
+    length = sum(abs(right[0] - left[0]) + abs(right[1] - left[1]) for left, right in zip(points, points[1:]))
+    assert points[0] == (origin.x_m, origin.y_m)
+    assert points[-1] == (dest.x_m, dest.y_m)
+    assert length == distance_m
+    assert (BLOCK_M, 0) in points
+    assert (2 * BLOCK_M, 0) in points
+
+
 def test_river_forces_a_detour_longer_than_the_straight_line() -> None:
     network = RoadNetwork()
     origin = Intersection(0, 4)

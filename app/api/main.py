@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from app.api.demo import router as demo_router
 from app.api.routes import router
 from app.db import Base, make_engine
+
+_DEMO_PAGE = Path(__file__).resolve().parents[1] / "demo" / "page.html"
 
 _HOME = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -24,7 +28,7 @@ _HOME = """<!DOCTYPE html>
 </head>
 <body>
   <h1>城市配送智能配载</h1>
-  <p>这是规划接口。打开本页不会出现地图或装箱图。先写入仓库、门店、车辆、订单和路网，再调用 <code>POST /v1/plans</code> 生成路线和装载方案。</p>
+    <p>规划接口仍然从 <code>POST /v1/plans</code> 进入。要看路线和车厢，打开 <a href="/demo">配送演示</a>。</p>
   <h2>接口</h2>
   <ul id="paths"><li>正在读取接口列表…</li></ul>
   <script>
@@ -55,11 +59,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.database_url = url
     app.include_router(router, prefix="/v1")
+    app.include_router(demo_router, prefix="/v1")
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
     def home() -> str:
         return _HOME
+
+    @app.get("/demo", response_class=HTMLResponse, include_in_schema=False)
+    def demo_page() -> str:
+        return _DEMO_PAGE.read_text(encoding="utf-8")
 
     return app
 
