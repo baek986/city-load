@@ -51,8 +51,41 @@
       font-weight: 600;
     }
     button:disabled { opacity: 0.55; cursor: wait; }
+    #run { position: relative; }
+    #run .spinner {
+      display: none;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: -2px;
+      margin-left: 6px;
+    }
+    #run.loading .spinner { display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .status { padding: 8px 20px 0; min-height: 1.4rem; color: var(--muted); font-size: 0.9rem; }
     .status.error { color: #9f1239; }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(255,253,249,0.75);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 3;
+      border-radius: 14px;
+    }
+    .overlay.active { display: flex; }
+    .overlay .ov-box { text-align: center; color: var(--muted); font-size: 0.9rem; }
+    .overlay .ov-ring {
+      width: 42px; height: 42px;
+      border: 4px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 10px;
+    }
     .stats {
       display: flex;
       flex-wrap: wrap;
@@ -66,11 +99,78 @@
       padding: 4px 10px;
       font-size: 0.82rem;
     }
+    .stat.optimality {
+      font-weight: 600;
+      border-width: 1.5px;
+    }
+    .stat.optimality.proven {
+      color: #14532d;
+      background: #dcfce7;
+      border-color: #16a34a;
+    }
+    .stat.optimality.near {
+      color: #7c2d12;
+      background: #ffedd5;
+      border-color: #ea580c;
+    }
+    .stat.optimality.unproven {
+      color: #44403c;
+      background: #f5f5f4;
+      border-color: #a8a29e;
+    }
+    .optimality-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 20px 0;
+    }
+    .optimality-line .stat { flex: none; }
+    .breakdown {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 20px 0;
+      align-items: stretch;
+    }
+    .breakdown-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 12px;
+      min-width: 130px;
+      flex: 1 1 150px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .breakdown-card .bd-label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+    }
+    .breakdown-card .bd-weight { color: var(--muted); font-size: 0.74rem; }
+    .breakdown-card .bd-value {
+      font-size: 1.1rem;
+      font-weight: 650;
+    }
+    .breakdown-card .bd-bar {
+      height: 6px;
+      background: #ece9e4;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .breakdown-card .bd-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 999px;
+    }
     .workspace {
       display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.9fr);
+      grid-template-columns: 1fr;
       gap: 12px;
       padding: 12px 20px 20px;
+      position: relative;
     }
     .panel {
       background: var(--panel);
@@ -86,8 +186,9 @@
       font-size: 1rem;
     }
     .panel .hint { margin: 2px 14px 0; color: var(--muted); font-size: 0.8rem; }
-    canvas { width: 100%; height: 560px; display: block; touch-action: none; }
+    canvas { width: 100%; height: 420px; display: block; touch-action: none; }
     #map { background: #d7e8cc; }
+    #cargo { height: 500px; }
     .toolbar, .vehicles, .stops {
       display: flex;
       flex-wrap: wrap;
@@ -123,9 +224,9 @@
       max-width: 220px;
     }
     @media (max-width: 960px) {
-      .workspace { grid-template-columns: 1fr; }
       .controls { margin-left: 0; }
-      canvas { height: 420px; }
+      canvas { height: 360px; }
+      #cargo { height: 420px; }
     }
   </style>
 </head>
@@ -133,18 +234,26 @@
   <header>
     <div>
       <h1>配送演示</h1>
-      <p>左边是模拟路网上的行车路线，右边是同一辆车的车厢。颜色按车辆区分，车厢里的颜色按门店区分。</p>
+      <p>上面是模拟路网上的行车路线，下面是同一辆车的车厢。颜色按车辆区分，车厢里的颜色按门店区分。</p>
     </div>
     <div class="controls">
       <label>场景
         <select id="scenario"></select>
       </label>
-      <button id="run" type="button">生成方案</button>
+      <button id="run" type="button">生成方案<span class="spinner"></span></button>
     </div>
   </header>
   <div id="status" class="status">选择场景后生成方案。30 店大约需要十几秒到半分钟。</div>
+  <div id="optimality" class="optimality-line"></div>
   <div id="stats" class="stats"></div>
+  <div id="breakdown" class="breakdown"></div>
   <div class="workspace">
+    <div id="overlay" class="overlay">
+      <div class="ov-box">
+        <div class="ov-ring"></div>
+        <span id="ov-text">正在规划路线和装载…</span>
+      </div>
+    </div>
     <section class="panel">
       <h2>路线</h2>
       <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。</p>
@@ -230,7 +339,7 @@
 
     function storeColor(route, storeId) {
       const index = route.stops.findIndex(function (stop) { return stop.store_id === storeId; });
-      const palette = ["#9a3412", "#1d4ed8", "#166534", "#7e22ce", "#be123c", "#0f766e", "#b45309", "#1e3a8a", "#9f1239", "#115e59"];
+      const palette = ["#ef4444", "#3b82f6", "#22c55e", "#a855f7", "#f43f5e", "#06b6d4", "#f59e0b", "#6366f1", "#ec4899", "#14b8a6"];
       return palette[(index < 0 ? 0 : index) % palette.length];
     }
 
@@ -275,17 +384,6 @@
       };
       const locations = state.scene ? state.scene.locations : [];
       let minX = -2400, minY = -2800, maxX = 4000, maxY = 3600;
-      if (locations.length) {
-        minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
-        locations.forEach(function (location) {
-          minX = Math.min(minX, location.x_m);
-          minY = Math.min(minY, location.y_m);
-          maxX = Math.max(maxX, location.x_m);
-          maxY = Math.max(maxY, location.y_m);
-        });
-        const padWorld = 1400;
-        minX -= padWorld; minY -= padWorld; maxX += padWorld; maxY += padWorld;
-      }
       const pad = 18;
       const scale = Math.min((view.width - pad * 2) / (maxX - minX), (view.height - pad * 2) / (maxY - minY));
       const originX = pad + ((view.width - pad * 2) - (maxX - minX) * scale) / 2;
@@ -1025,7 +1123,7 @@
         minX = Math.min(minX, corner.x); minY = Math.min(minY, corner.y);
         maxX = Math.max(maxX, corner.x); maxY = Math.max(maxY, corner.y);
       });
-      const pad = 36;
+      const pad = 20;
       const scale = Math.min((view.width - pad * 2) / (maxX - minX || 1), (view.height - pad * 2) / (maxY - minY || 1));
       const offsetX = pad + ((view.width - pad * 2) - (maxX - minX) * scale) / 2 - minX * scale;
       const offsetY = pad + ((view.height - pad * 2) - (maxY - minY) * scale) / 2 - minY * scale;
@@ -1042,8 +1140,8 @@
         context.closePath();
         context.fillStyle = color;
         context.fill();
-        context.strokeStyle = "rgba(28,25,23,0.35)";
-        context.lineWidth = 1;
+        context.strokeStyle = "rgba(28,25,23,0.5)";
+        context.lineWidth = 1.5;
         context.stroke();
       }
       function wire() {
@@ -1069,7 +1167,10 @@
       const boxes = visiblePlacements(route).slice().sort(function (left, right) {
         if (state.view === "top") return left.z - right.z;
         if (state.view === "side") return right.y - left.y;
-        return (right.x + right.y) - (left.x + left.y) || left.z - right.z;
+        // 等距投影的屏幕深度为 (x + y) * sin - z（sin = 0.5），
+        // 即等价于 x + y - 2z。深度越小（越远/越高）越先画。
+        const depth = function (box) { return box.x + box.y - 2 * box.z; };
+        return depth(left) - depth(right);
       });
       if (state.view !== "iso") wire();
       boxes.forEach(function (box) {
@@ -1095,13 +1196,13 @@
             projectBox(state.view, x + dx, y, z),
             projectBox(state.view, x + dx, y, z + dz),
             projectBox(state.view, x, y, z + dz)
-          ], shade(color, 0.62));
+          ], shade(color, 0.7));
           face([
             projectBox(state.view, x, y, z),
             projectBox(state.view, x, y + dy, z),
             projectBox(state.view, x, y + dy, z + dz),
             projectBox(state.view, x, y, z + dz)
-          ], shade(color, 0.8));
+          ], shade(color, 0.85));
           face([
             projectBox(state.view, x, y, z + dz),
             projectBox(state.view, x + dx, y, z + dz),
@@ -1189,23 +1290,78 @@
       else label.textContent = "已卸 " + state.unloaded + " 家，还剩 " + (route.stops.length - state.unloaded) + " 家";
     }
 
+    function optimalityInfo(summary) {
+      if (summary.proven_optimal) {
+        return { cls: "proven", text: "✓ 已证明最优" };
+      }
+      const gap = summary.gap == null ? null : Number(summary.gap);
+      if (gap == null) {
+        return { cls: "unproven", text: "未证明最优" };
+      }
+      const pct = (gap * 100).toFixed(1);
+      const cls = gap < 0.05 ? "near" : "unproven";
+      return { cls: cls, text: "未证明最优 · 间隙 " + pct + "%" };
+    }
+
     function renderStats() {
       const host = document.getElementById("stats");
+      const optHost = document.getElementById("optimality");
+      const bdHost = document.getElementById("breakdown");
       host.innerHTML = "";
+      optHost.innerHTML = "";
+      bdHost.innerHTML = "";
       if (!state.scene) return;
       const summary = state.scene.summary;
+
+      const opt = optimalityInfo(summary);
+      const optItem = document.createElement("span");
+      optItem.className = "stat optimality " + opt.cls;
+      optItem.textContent = opt.text;
+      optHost.appendChild(optItem);
+
       const bits = [
         summary.store_count + " 家店",
         summary.used_vehicle_count + " 辆车",
         "准时率 " + Math.round(summary.on_time_rate * 100) + "%",
         "拆单 " + summary.split_order_count,
-        summary.proven_optimal ? "已证明最优" : "间隙 " + (summary.gap == null ? "—" : Number(summary.gap).toFixed(2))
+        "分数 " + (summary.score == null ? "—" : Number(summary.score).toFixed(1)),
+        "迭代 " + (summary.rounds == null ? "—" : summary.rounds) + " 轮"
       ];
       bits.forEach(function (text) {
         const item = document.createElement("span");
         item.className = "stat";
         item.textContent = text;
         host.appendChild(item);
+      });
+
+      const breakdown = summary.score_breakdown || [];
+      const total = breakdown.reduce(function (acc, item) { return acc + item.value; }, 0);
+      breakdown.forEach(function (item) {
+        const card = document.createElement("div");
+        card.className = "breakdown-card";
+        const label = document.createElement("div");
+        label.className = "bd-label";
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = item.label;
+        const weightSpan = document.createElement("span");
+        weightSpan.className = "bd-weight";
+        weightSpan.textContent = "权重 " + item.weight;
+        label.appendChild(nameSpan);
+        label.appendChild(weightSpan);
+        const value = document.createElement("div");
+        value.className = "bd-value";
+        value.textContent = item.value.toFixed(2);
+        const bar = document.createElement("div");
+        bar.className = "bd-bar";
+        const fill = document.createElement("div");
+        fill.className = "bd-fill";
+        const ratio = total > 0 ? item.value / total : 0;
+        fill.style.width = (ratio * 100).toFixed(1) + "%";
+        bar.appendChild(fill);
+        card.appendChild(label);
+        card.appendChild(value);
+        card.appendChild(bar);
+        bdHost.appendChild(card);
       });
     }
 
@@ -1279,8 +1435,11 @@
       const button = document.getElementById("run");
       const status = document.getElementById("status");
       const select = document.getElementById("scenario");
+      const overlay = document.getElementById("overlay");
       const scenario = state.scenarios.find(function (item) { return item.id === select.value; });
       button.disabled = true;
+      button.classList.add("loading");
+      overlay.classList.add("active");
       status.className = "status";
       status.textContent = "正在一起规划路线和装载…";
       const started = performance.now();
@@ -1313,6 +1472,8 @@
         status.textContent = error.message;
       } finally {
         button.disabled = false;
+        button.classList.remove("loading");
+        overlay.classList.remove("active");
       }
     });
 

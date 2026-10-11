@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from app.domain.matrix import TravelMatrix
-from app.domain.models import Dataset, JointResult
+from app.domain.models import Dataset, JointResult, Weights
 from app.network.roads import ARTERIAL_SPEED_MPS, BLOCK_M, LOCAL_SPEED_MPS, RoadNetwork
+from app.optimizer.scoring import build_scales, extra_handling, split_order_count
 
 _COLORS = (
     "#b45309",
@@ -108,17 +109,38 @@ def build_scene(dataset: Dataset, result: JointResult, scenario: dict) -> dict:
             }
         )
 
+    weights = Weights()
+    scales = build_scales(dataset, matrix)
+    cost = sum(route.travel_cost + route.fixed_cost for route in result.routes)
+    travel_time = sum(route.travel_time_s for route in result.routes)
+    late = sum(stop.late_minutes for route in result.routes for stop in route.stops)
+    stops = sum(len(route.stops) for route in result.routes)
+    handling = stops + extra_handling(result.placements)
+    split_count = result.split_order_count
+    score_breakdown = [
+        {"key": "cost", "label": "成本", "weight": weights.cost, "value": weights.cost * cost / scales.cost},
+        {"key": "time", "label": "行驶时间", "weight": weights.time, "value": weights.time * travel_time / scales.time},
+        {"key": "late", "label": "迟到", "weight": weights.late, "value": weights.late * late / scales.late},
+        {"key": "handling", "label": "装卸", "weight": weights.handling, "value": weights.handling * handling / scales.handling},
+        {"key": "split", "label": "拆单", "weight": weights.split, "value": weights.split * split_count / scales.split},
+    ]
+
     return {
         "scenario": scenario,
         "summary": {
             "proven_optimal": result.proven_optimal,
             "gap": result.gap,
+            "lower_bound": result.lower_bound,
+            "upper_bound": result.upper_bound,
             "score": result.score,
+            "rounds": result.rounds,
+            "iteration_limit_reached": result.iteration_limit_reached,
             "on_time_rate": result.on_time_rate,
             "split_order_count": result.split_order_count,
             "store_count": len(dataset.stores),
             "used_vehicle_count": len(routes),
             "reshuffle_count": result.reshuffle_count,
+            "score_breakdown": score_breakdown,
         },
         "network": {
             "block_m": BLOCK_M,
