@@ -15,6 +15,7 @@
       --accent: #9a3412;
     }
     * { box-sizing: border-box; }
+    html { font-size: 18px; }
     body {
       margin: 0;
       font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -233,9 +234,10 @@
       font-size: 1rem;
     }
     .panel .hint { margin: 2px 14px 0; color: var(--muted); font-size: 0.8rem; }
-    canvas { width: 100%; height: 420px; display: block; touch-action: none; }
-    #map { background: #d7e8cc; }
-    #cargo { height: 500px; }
+    canvas { width: 100%; height: 560px; display: block; touch-action: none; }
+    #map { background: #d7e8cc; cursor: grab; }
+    #map.dragging { cursor: grabbing; }
+    #cargo { height: 680px; }
     .toolbar, .vehicles, .stops {
       display: flex;
       flex-wrap: wrap;
@@ -256,8 +258,64 @@
     .chip.active, .view-btn.active { border-color: var(--ink); font-weight: 650; }
     .swatch { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
     .stops { color: var(--muted); font-size: 0.82rem; }
-    .slider { padding: 0 14px 12px; display: flex; gap: 8px; align-items: center; font-size: 0.82rem; color: var(--muted); }
-    input[type="range"] { flex: 1; }
+    .unload { padding: 2px 14px 10px; }
+    .unload-row { display: flex; align-items: center; gap: 10px; }
+    #progress-label { flex: 1; min-width: 0; text-align: center; font-size: 0.84rem; color: var(--muted); }
+    .step-btn {
+      border: 1px solid #d6d3d1;
+      background: white;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 4px 12px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    .step-btn:disabled { opacity: 0.35; cursor: default; }
+    .unload-bar {
+      position: relative;
+      height: 28px;
+      margin-top: 4px;
+      cursor: pointer;
+      touch-action: none;
+    }
+    .unload-line, .unload-fill {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      top: 50%;
+      height: 4px;
+      margin-top: -2px;
+      border-radius: 999px;
+      background: #e7e5e4;
+    }
+    .unload-fill { right: auto; width: 0; background: var(--accent); }
+    .unload-thumb {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: white;
+      border: 2px solid var(--accent);
+      box-shadow: 0 1px 2px rgba(28, 25, 23, 0.16);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .stop-btn {
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.82rem;
+      border-radius: 999px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .stop-btn.done { color: #a8a29e; }
+    .stop-btn.next { border-color: var(--line); color: var(--ink); background: white; }
     #tip {
       position: fixed;
       z-index: 5;
@@ -272,8 +330,8 @@
     }
     @media (max-width: 960px) {
       .controls { margin-left: 0; }
-      canvas { height: 360px; }
-      #cargo { height: 420px; }
+      canvas { height: 460px; }
+      #cargo { height: 540px; }
     }
   </style>
 </head>
@@ -316,7 +374,7 @@
       </div>
       <section class="panel">
         <h2>路线</h2>
-        <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。</p>
+        <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。滚轮缩放，拖动平移，双击恢复。</p>
         <canvas id="map"></canvas>
         <div id="vehicles" class="vehicles"></div>
       </section>
@@ -329,9 +387,17 @@
           <button class="view-btn" type="button" data-view="top">俯视</button>
           <button class="view-btn" type="button" data-view="side">侧视</button>
         </div>
-        <div class="slider">
-          <span id="progress-label">整车</span>
-          <input id="progress" type="range" min="0" value="0" disabled>
+        <div class="unload">
+          <div class="unload-row">
+            <button class="step-btn" id="unload-prev" type="button" disabled>上一站</button>
+            <span id="progress-label">整车</span>
+            <button class="step-btn" id="unload-next" type="button" disabled>下一站</button>
+          </div>
+          <div id="progress" class="unload-bar">
+            <div class="unload-line"></div>
+            <div id="progress-fill" class="unload-fill"></div>
+            <div id="progress-thumb" class="unload-thumb"></div>
+          </div>
         </div>
         <div id="stops" class="stops"></div>
       </section>
@@ -349,7 +415,11 @@
       tasks: [],
       currentTaskId: null,
       pollTimer: null,
-      listTimer: null
+      listTimer: null,
+      mapZoom: 1,
+      mapPanX: 0,
+      mapPanY: 0,
+      mapView: null
     };
 
     const mapCanvas = document.getElementById("map");
@@ -450,18 +520,25 @@
       const locations = state.scene ? state.scene.locations : [];
       let minX = -2400, minY = -2800, maxX = 4000, maxY = 3600;
       const pad = 18;
-      const scale = Math.min((view.width - pad * 2) / (maxX - minX), (view.height - pad * 2) / (maxY - minY));
-      const originX = pad + ((view.width - pad * 2) - (maxX - minX) * scale) / 2;
-      const originY = pad + ((view.height - pad * 2) - (maxY - minY) * scale) / 2;
+      const fitScale = Math.min((view.width - pad * 2) / (maxX - minX), (view.height - pad * 2) / (maxY - minY));
+      const scale = fitScale * (state.mapZoom || 1);
+      const worldCx = (minX + maxX) / 2 + (state.mapPanX || 0);
+      const worldCy = (minY + maxY) / 2 + (state.mapPanY || 0);
+      state.mapView = { scale: scale, worldCx: worldCx, worldCy: worldCy, width: view.width, height: view.height };
       function project(x, y) {
-        return [originX + (x - minX) * scale, originY + (maxY - y) * scale];
+        return [view.width / 2 + (x - worldCx) * scale, view.height / 2 - (y - worldCy) * scale];
+      }
+      function unproject(px, py) {
+        return [worldCx + (px - view.width / 2) / scale, worldCy - (py - view.height / 2) / scale];
       }
       const block = network.block_m;
       const limit = network.half_blocks * block;
-      const viewMinX = minX - originX / scale;
-      const viewMaxX = minX + (view.width - originX) / scale;
-      const viewMaxY = maxY + originY / scale;
-      const viewMinY = maxY - (view.height - originY) / scale;
+      const southWest = unproject(0, view.height);
+      const northEast = unproject(view.width, 0);
+      const viewMinX = southWest[0];
+      const viewMinY = southWest[1];
+      const viewMaxX = northEast[0];
+      const viewMaxY = northEast[1];
       const riverLeft = network.river_x_m - block / 2;
       const riverRight = network.river_x_m + block / 2;
       const riverI = Math.floor(network.river_x_m / block);
@@ -1096,10 +1173,13 @@
       context.lineWidth = 1;
       context.strokeStyle = "rgba(28,25,23,0.08)";
       context.stroke();
-      let meters = 2000;
-      let barPx = meters * scale;
-      if (barPx > 120) { meters = 1000; barPx = meters * scale; }
-      if (barPx < 46) { meters = 5000; barPx = meters * scale; }
+      const steps = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+      let meters = steps[0];
+      for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+        if (steps[stepIndex] * scale > 140) break;
+        meters = steps[stepIndex];
+      }
+      const barPx = meters * scale;
       const barLabel = meters >= 1000 ? (meters / 1000) + " km" : meters + " m";
       context.strokeStyle = "#1c1917";
       context.lineWidth = 2;
@@ -1326,33 +1406,60 @@
       host.innerHTML = "";
       const route = selectedRoute();
       if (!route) return;
-      route.stops.forEach(function (stop) {
-        const item = document.createElement("span");
+      route.stops.forEach(function (stop, index) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "stop-btn";
+        if (index < state.unloaded) item.classList.add("done");
+        else if (index === state.unloaded) item.classList.add("next");
         const dot = document.createElement("span");
         dot.className = "swatch";
         dot.style.background = storeColor(route, stop.store_id);
         item.appendChild(dot);
         item.appendChild(document.createTextNode(stop.sequence + ". " + stop.name + " " + clock(stop.arrival_s)));
+        item.addEventListener("click", function () {
+          setUnloaded(index + 1);
+        });
         host.appendChild(item);
       });
     }
 
     function syncProgress() {
       const route = selectedRoute();
-      const slider = document.getElementById("progress");
+      const track = document.getElementById("progress");
       const label = document.getElementById("progress-label");
-      if (!route) {
-        slider.disabled = true;
-        slider.value = "0";
+      const prev = document.getElementById("unload-prev");
+      const next = document.getElementById("unload-next");
+      const fill = document.getElementById("progress-fill");
+      const thumb = document.getElementById("progress-thumb");
+      if (!route || !route.stops.length) {
+        prev.disabled = true;
+        next.disabled = true;
+        fill.style.width = "0";
+        thumb.style.left = "8px";
         label.textContent = "整车";
         return;
       }
-      slider.disabled = false;
-      slider.max = String(route.stops.length);
-      slider.value = String(state.unloaded);
-      if (state.unloaded === 0) label.textContent = "刚装满，尚未卸货";
-      else if (state.unloaded >= route.stops.length) label.textContent = "已全部卸完";
-      else label.textContent = "已卸 " + state.unloaded + " 家，还剩 " + (route.stops.length - state.unloaded) + " 家";
+      const max = route.stops.length;
+      state.unloaded = Math.max(0, Math.min(max, state.unloaded));
+      prev.disabled = state.unloaded <= 0;
+      next.disabled = state.unloaded >= max;
+      if (state.unloaded === 0) label.textContent = "刚装满，下一站 " + route.stops[0].name;
+      else if (state.unloaded >= max) label.textContent = "已卸完最后一站 " + route.stops[max - 1].name;
+      else label.textContent = "已卸 " + route.stops[state.unloaded - 1].name + "，下一站 " + route.stops[state.unloaded].name;
+      const span = track.clientWidth - 16;
+      const x = 8 + (max === 0 ? 0 : state.unloaded / max) * span;
+      fill.style.width = Math.max(0, x - 8) + "px";
+      thumb.style.left = x + "px";
+    }
+
+    function setUnloaded(count) {
+      const route = selectedRoute();
+      const max = route ? route.stops.length : 0;
+      state.unloaded = Math.max(0, Math.min(max, count));
+      drawCargo();
+      syncProgress();
+      renderStops();
     }
 
     function optimalityInfo(summary) {
@@ -1432,10 +1539,31 @@
       syncProgress();
     }
 
-    document.getElementById("progress").addEventListener("input", function (event) {
-      state.unloaded = Number(event.target.value);
-      drawCargo();
-      syncProgress();
+    document.getElementById("unload-prev").addEventListener("click", function () {
+      setUnloaded(state.unloaded - 1);
+    });
+    document.getElementById("unload-next").addEventListener("click", function () {
+      setUnloaded(state.unloaded + 1);
+    });
+    const unloadTrack = document.getElementById("progress");
+    function unloadFromPoint(event) {
+      const route = selectedRoute();
+      if (!route || !route.stops.length) return;
+      const rect = unloadTrack.getBoundingClientRect();
+      const span = rect.width - 16;
+      if (span <= 0) return;
+      const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left - 8) / span));
+      const count = Math.round(ratio * route.stops.length);
+      if (count !== state.unloaded) setUnloaded(count);
+    }
+    unloadTrack.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0) return;
+      unloadTrack.setPointerCapture(event.pointerId);
+      unloadFromPoint(event);
+    });
+    unloadTrack.addEventListener("pointermove", function (event) {
+      if (!unloadTrack.hasPointerCapture(event.pointerId)) return;
+      unloadFromPoint(event);
     });
 
     document.querySelectorAll(".view-btn").forEach(function (button) {
@@ -1446,7 +1574,55 @@
       });
     });
 
+    mapCanvas.addEventListener("wheel", function (event) {
+      event.preventDefault();
+      const view = state.mapView;
+      if (!view) return;
+      const rect = mapCanvas.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      const worldX = view.worldCx + (px - view.width / 2) / view.scale;
+      const worldY = view.worldCy - (py - view.height / 2) / view.scale;
+      const nextZoom = Math.max(0.15, Math.min(32, state.mapZoom * (event.deltaY < 0 ? 1.28 : 1 / 1.28)));
+      const nextScale = view.scale * (nextZoom / state.mapZoom);
+      state.mapZoom = nextZoom;
+      const nextWorldCx = worldX - (px - view.width / 2) / nextScale;
+      const nextWorldCy = worldY + (py - view.height / 2) / nextScale;
+      const minX = -2400, minY = -2800, maxX = 4000, maxY = 3600;
+      state.mapPanX = nextWorldCx - (minX + maxX) / 2;
+      state.mapPanY = nextWorldCy - (minY + maxY) / 2;
+      drawMap();
+    }, { passive: false });
+
+    let mapDrag = null;
+    mapCanvas.addEventListener("mousedown", function (event) {
+      if (event.button !== 0) return;
+      mapDrag = { x: event.clientX, y: event.clientY, panX: state.mapPanX, panY: state.mapPanY, moved: false };
+    });
+    window.addEventListener("mousemove", function (event) {
+      if (!mapDrag || !state.mapView) return;
+      const dx = event.clientX - mapDrag.x;
+      const dy = event.clientY - mapDrag.y;
+      if (Math.hypot(dx, dy) < 4) return;
+      mapDrag.moved = true;
+      mapCanvas.classList.add("dragging");
+      state.mapPanX = mapDrag.panX - dx / state.mapView.scale;
+      state.mapPanY = mapDrag.panY + dy / state.mapView.scale;
+      drawMap();
+    });
+    window.addEventListener("mouseup", function () {
+      mapDrag = null;
+      mapCanvas.classList.remove("dragging");
+    });
+    mapCanvas.addEventListener("dblclick", function () {
+      state.mapZoom = 1;
+      state.mapPanX = 0;
+      state.mapPanY = 0;
+      drawMap();
+    });
+
     mapCanvas.addEventListener("mousemove", function (event) {
+      if (mapDrag && mapDrag.moved) return;
       const rect = mapCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
@@ -1660,6 +1836,9 @@
             if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
             overlay.classList.remove("active");
             state.scene = body.scene;
+            state.mapZoom = 1;
+            state.mapPanX = 0;
+            state.mapPanY = 0;
             state.vehicleId = body.scene.routes.length ? body.scene.routes[0].vehicle_id : null;
             state.unloaded = 0;
             status.className = "status";

@@ -21,6 +21,12 @@ class DemoSolve(BaseModel):
     time_limit_s: float = 90.0
 
 
+class DispatchCreate(BaseModel):
+    text: str
+    time_limit_s: float = 180.0
+    prove_optimal: bool = False
+
+
 class ReplanCreate(BaseModel):
     locked_order_ids: list[str] = Field(default_factory=list)
     locked_vehicle_ids: list[str] = Field(default_factory=list)

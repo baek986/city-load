@@ -309,6 +309,28 @@ class Repository:
             )
         return orders
 
+    def increase_order_qty(self, order_id: str, sku_id: str | None, qty: int) -> None:
+        lines = list(self.session.scalars(select(OrderLineRow).where(OrderLineRow.order_id == order_id)))
+        if sku_id is None:
+            if not lines:
+                raise ValueError(f"order {order_id} has no lines")
+            lines[0].qty += qty
+            self.session.flush()
+            return
+        target = next((line for line in lines if line.sku_id == sku_id), None)
+        if target is None:
+            self.session.add(
+                OrderLineRow(
+                    id=f"{order_id}:{sku_id}:{uuid.uuid4().hex[:8]}",
+                    order_id=order_id,
+                    sku_id=sku_id,
+                    qty=qty,
+                )
+            )
+        else:
+            target.qty += qty
+        self.session.flush()
+
     def delete_order(self, order_id: str) -> bool:
         row = self.session.get(OrderRow, order_id)
         if row is None:

@@ -5,7 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.schemas import PlanCreate, ReplanCreate
+from app.agent.dispatch import DispatchError, apply_edits, prepare_dispatch
+from app.agent.proposal import model_proposal_enabled
+from app.api.schemas import DispatchCreate, PlanCreate, ReplanCreate
 from app.db import Repository
 from app.domain.models import LoadingRule, Location, Order, Sku, TravelArc, Vehicle, Weights
 from app.optimizer.joint import replan, solve_joint
@@ -42,7 +44,14 @@ def _run_plan(engine, plan_id: str, time_limit_s: float, prove_optimal: bool = F
             return
         dataset = repo.load_dataset(row.service_date)
         weights = Weights.model_validate_json(row.weights_json)
-        result = solve_joint(dataset, weights=weights, seed=row.seed, time_limit_s=time_limit_s, prove_optimal=prove_optimal)
+        result = solve_joint(
+            dataset,
+            weights=weights,
+            seed=row.seed,
+            time_limit_s=time_limit_s,
+            prove_optimal=prove_optimal,
+            model_proposal=model_proposal_enabled(),
+        )
         repo.save_result(plan_id, result)
         session.commit()
     except Exception as exc:
@@ -96,6 +105,8 @@ def _summary(plan_id: str, status: str, result) -> dict:
         "error": error,
         "infeasible_stores": result.infeasible_stores,
         "failed_unit_ids": result.failed_unit_ids,
+        "model_proposal_accepted": result.model_proposal_accepted,
+        "model_proposal_note": result.model_proposal_note,
     }
 
 
@@ -283,6 +294,7 @@ def post_replan(
                 time_limit_s=body.time_limit_s,
                 locked_vehicle_ids=body.locked_vehicle_ids,
                 prove_optimal=body.prove_optimal,
+                model_proposal=model_proposal_enabled(),
             )
             local.save_result(new_id, result)
             session.commit()
@@ -297,6 +309,55 @@ def post_replan(
 
     background.add_task(_job)
     return {"plan_id": new_id, "status": "running"}
+
+
+@router.post("/plans/{plan_id}/dispatch", status_code=202)
+def post_dispatch(
+    plan_id: str,
+    body: DispatchCreate,
+    background: BackgroundTasks,
+    request: Request,
+    repo: Repository = Depends(get_repo),
+) -> dict:
+    try:
+        prepared, previous, service_date, seed = prepare_dispatch(repo, plan_id, body.text)
+    except DispatchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=_error_detail(exc.code, exc.message)) from exc
+    apply_edits(repo, prepared)
+    new_id = repo.create_plan(service_date, prepared.weights, seed)
+
+    def _job() -> None:
+        session = Session(request.app.state.engine)
+        local = Repository(session)
+        try:
+            dataset = local.load_dataset(service_date)
+            result = replan(
+                dataset,
+                previous,
+                locked_order_ids=prepared.locked_order_ids,
+                weights=prepared.weights,
+                seed=seed,
+                time_limit_s=body.time_limit_s,
+                locked_vehicle_ids=prepared.locked_vehicle_ids,
+                prove_optimal=body.prove_optimal,
+                model_proposal=model_proposal_enabled(),
+            )
+            local.save_result(new_id, result)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            from app.domain.models import JointResult
+
+            local.save_result(new_id, JointResult(status="failed", error_code="internal_error", error_message=str(exc)))
+            session.commit()
+        finally:
+            session.close()
+
+    background.add_task(_job)
+    payload = prepared.public()
+    payload["plan_id"] = new_id
+    payload["status"] = "running"
+    return payload
 
 
 def _require_result(plan_id: str, repo: Repository):

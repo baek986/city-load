@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from fastapi import APIRouter, HTTPException
 
-from app.api.schemas import CustomSolve, DemoSolve, TaskCreate
+from app.api.schemas import DemoSolve, TaskCreate
 from app.demo.scenarios import (
     SCENARIOS,
     custom_catalogue,
@@ -18,6 +18,7 @@ from app.demo.scenarios import (
     scenario_by_id,
 )
 from app.demo.view import build_scene
+from app.agent.proposal import model_proposal_enabled
 from app.optimizer.joint import solve_joint
 
 router = APIRouter()
@@ -76,7 +77,12 @@ def _task_to_dict(t: _Task) -> dict:
 def _run_solve(task_id: str, dataset, seed: int, time_limit_s: float, scenario_meta: dict) -> None:
     _set_task(task_id, status="running")
     try:
-        result = solve_joint(dataset, seed=seed, time_limit_s=time_limit_s)
+        result = solve_joint(
+            dataset,
+            seed=seed,
+            time_limit_s=time_limit_s,
+            model_proposal=model_proposal_enabled(),
+        )
         if result.status != "completed":
             _set_task(
                 task_id,
@@ -92,7 +98,7 @@ def _run_solve(task_id: str, dataset, seed: int, time_limit_s: float, scenario_m
 
 
 # ---------------------------------------------------------------------------
-# Preset scenario endpoints (kept for backward compatibility).
+# Preset scenarios. The page lists them, then solves through /demo/tasks.
 # ---------------------------------------------------------------------------
 
 @router.get("/demo/scenarios")
@@ -107,7 +113,12 @@ def post_demo(body: DemoSolve) -> dict:
         dataset = load_scenario(body.scenario)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": str(exc)}) from exc
-    result = solve_joint(dataset, seed=body.seed, time_limit_s=body.time_limit_s)
+    result = solve_joint(
+        dataset,
+        seed=body.seed,
+        time_limit_s=body.time_limit_s,
+        model_proposal=model_proposal_enabled(),
+    )
     if result.status != "completed":
         raise HTTPException(
             status_code=409,
@@ -122,41 +133,13 @@ def post_demo(body: DemoSolve) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Custom scenario catalogue + solve (kept for backward compatibility).
+# Custom catalogue. The page submits a custom day through /demo/tasks.
 # ---------------------------------------------------------------------------
 
 @router.get("/demo/catalog")
 def get_catalog() -> dict:
     """Return the catalogue of selectable stores, SKUs, and vehicles for the custom scenario."""
     return custom_catalogue()
-
-
-@router.post("/demo/solve-custom")
-def post_solve_custom(body: CustomSolve) -> dict:
-    """Solve a custom day built from user-selected stores and SKU lines."""
-    if not body.stores:
-        raise HTTPException(status_code=422, detail={"code": "no_stores", "message": "请至少选择一个门店"})
-    has_lines = any(line.qty > 0 for store in body.stores for line in store.lines)
-    if not has_lines:
-        raise HTTPException(status_code=422, detail={"code": "no_skus", "message": "请至少为一个门店选择药箱"})
-    store_picks = [
-        {"store_id": store.store_id, "lines": [{"sku_id": line.sku_id, "qty": line.qty} for line in store.lines]}
-        for store in body.stores
-    ]
-    dataset = custom_day(store_picks)
-    result = solve_joint(dataset, seed=body.seed, time_limit_s=body.time_limit_s)
-    if result.status != "completed":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": result.error_code or "failed",
-                "message": result.error_message or "No feasible plan",
-                "unit_ids": result.failed_unit_ids,
-                "store_ids": result.infeasible_stores,
-            },
-        )
-    scenario = {"id": "custom", "name": "自定义", "detail": f"{len(dataset.stores)}家店", "seed": body.seed, "time_limit_s": body.time_limit_s}
-    return build_scene(dataset, result, scenario)
 
 
 # ---------------------------------------------------------------------------

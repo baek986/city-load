@@ -60,7 +60,9 @@ class AgentToolbox:
     def create_plan(self, date: str, weights: dict | None = None, seed: int = 1) -> dict:
         parsed = Weights.model_validate(weights or {})
         dataset = self.repo.load_dataset(date)
-        result = solve_joint(dataset, weights=parsed, seed=seed)
+        from app.agent.proposal import model_proposal_enabled
+
+        result = solve_joint(dataset, weights=parsed, seed=seed, model_proposal=model_proposal_enabled())
         plan_id = self.repo.create_plan(date, parsed, seed)
         self.repo.save_result(plan_id, result)
         return self.get_plan_summary(plan_id)
@@ -160,10 +162,19 @@ class AgentToolbox:
             return []
         return [step.model_dump() for step in result.steps if step.vehicle_id == vehicle_id]
 
+    def dispatch_plan(self, plan_id: str, text: str, time_limit_s: float = 180.0) -> dict:
+        from app.agent.dispatch import DispatchError, run_dispatch
+
+        try:
+            return run_dispatch(self.repo, plan_id, text, time_limit_s=time_limit_s)
+        except DispatchError as exc:
+            return {"error": exc.code, "message": exc.message}
+
     def replan_with_changes(
         self,
         plan_id: str,
         locked_orders: list[str] | None = None,
+        locked_vehicles: list[str] | None = None,
         weight_overrides: dict | None = None,
         seed: int | None = None,
     ) -> dict:
@@ -179,6 +190,7 @@ class AgentToolbox:
             locked_order_ids=list(locked_orders or []),
             weights=weights,
             seed=row.seed if seed is None else seed,
+            locked_vehicle_ids=list(locked_vehicles or []),
         )
         new_id = self.repo.create_plan(row.service_date, weights, row.seed if seed is None else seed)
         self.repo.save_result(new_id, result)

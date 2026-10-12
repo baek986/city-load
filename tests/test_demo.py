@@ -19,12 +19,12 @@ def test_demo_page_links_route_and_loading() -> None:
     assert "中心公园" in page.text
     assert 'id="map"' in page.text
     assert 'id="cargo"' in page.text
-    assert "看全图" in page.text
-    assert "看本车" in page.text
     assert "滚轮缩放" in page.text
+    assert "轴测" in page.text
+    assert "上一站" in page.text
     home = client.get("/")
     assert home.status_code == 200
-    assert 'href="/demo"' in home.text
+    assert "配送演示" in home.text
     listed = client.get("/v1/demo/scenarios")
     assert listed.status_code == 200
     ids = {item["id"] for item in listed.json()["scenarios"]}

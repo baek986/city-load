@@ -89,18 +89,6 @@ def _simulate(
     )
 
 
-def route_distance(nodes: list[CustomerNode], matrix: TravelMatrix, depot_id: str) -> int:
-    if not nodes:
-        return 0
-    previous = depot_id
-    distance = 0
-    for node in nodes:
-        distance += matrix.get(previous, node.store_id).distance_m
-        previous = node.store_id
-    distance += matrix.get(previous, depot_id).distance_m
-    return distance
-
-
 def _geo_scale_m(nodes: list[CustomerNode], dataset: Dataset, matrix: TravelMatrix) -> float:
     if not nodes:
         return 1.0
@@ -290,7 +278,3 @@ def materialize_routes(
             return None
         plans.append(plan)
     return plans
-
-
-def total_distance(routes: list[RoutePlan]) -> int:
-    return sum(route.distance_m for route in routes)

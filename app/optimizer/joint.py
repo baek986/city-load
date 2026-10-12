@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from itertools import combinations, permutations, product
 
@@ -20,7 +21,7 @@ from app.domain.models import (
 )
 from app.domain.units import assert_units_fit_fleet, build_units, group_units_by_store, make_node
 from app.optimizer.adaptive import adaptive_improve
-from app.optimizer.initial_agent import propose_initial
+from app.optimizer.initial_agent import _evaluate, _joint_insertion
 from app.optimizer.instructions import build_instructions
 from app.optimizer.master import ArcCut, AssignmentCut, SetCut, sequence_arcs, solve_master
 from app.optimizer.packing import (
@@ -531,6 +532,7 @@ def solve_joint(
     fixed_nodes: dict[str, str] | None = None,
     prove_optimal: bool = False,
     search_workers: int = 1,
+    model_proposal: bool = False,
 ) -> JointResult:
     """Solve the joint problem.
 
@@ -570,6 +572,35 @@ def solve_joint(
         return _failed(exc.code, exc.message)
 
     node_by_id = {node.node_id: node for node in nodes}
+    model_thread: threading.Thread | None = None
+    model_ready_by = time.monotonic()
+    model_lock = threading.Lock()
+    model_box: dict = {"done": not model_proposal, "consumed": False, "assignment": None, "note": None}
+    if model_proposal:
+        from app.agent.proposal import MODEL_TIMEOUT_S, propose_model_assignment
+
+        model_ready_by = time.monotonic() + MODEL_TIMEOUT_S
+
+        def _fetch_model() -> None:
+            try:
+                drafted, note = propose_model_assignment(
+                    nodes,
+                    dataset,
+                    matrix,
+                    units_by_id,
+                    fixed_nodes=fixed_nodes,
+                    timeout_s=MODEL_TIMEOUT_S,
+                    weights=weights,
+                )
+            except Exception:
+                drafted, note = None, "模型初稿失败"
+            with model_lock:
+                model_box["assignment"] = drafted
+                model_box["note"] = note
+                model_box["done"] = True
+
+        model_thread = threading.Thread(target=_fetch_model, name="route-proposal", daemon=True)
+        model_thread.start()
     set_cuts = _pair_cuts(nodes, dataset.vehicles, dataset, units_by_id)
     arc_cuts: list[ArcCut] = []
     assignment_cuts: list[AssignmentCut] = []
@@ -584,38 +615,47 @@ def solve_joint(
     stable_rounds = 0
     iteration_limit_reached = False
 
+    def _keep(assignment: dict[str, list[CustomerNode]], evaluated) -> bool:
+        nonlocal constructed, best_routes, best_placements, best_score
+        routes, placements, score = evaluated
+        if best_score is not None and score >= best_score - 1e-9:
+            return False
+        constructed = assignment
+        best_routes, best_placements, best_score = routes, placements, score
+        return True
+
     constructed = _best_construction(nodes, dataset, matrix, units_by_id, weights, scales)
     if constructed is not None:
-        routes = materialize_routes(constructed, dataset, matrix)
-        placements, failed = _pack_assignment(constructed, dataset, units_by_id)
-        if routes is not None and failed is None:
-            best_routes = routes
-            best_placements = placements
-            best_score = score_routes(
-                routes,
-                placements,
-                split_order_count(routes, {unit.unit_id: unit.order_id for unit in units}),
-                weights,
-                scales,
-            )
+        evaluated = _evaluate(constructed, dataset, matrix, units_by_id, weights, scales)
+        if evaluated is not None:
+            _keep(constructed, evaluated)
+
+    proposal_note: str | None = None
+    proposal_accepted: bool | None = None
 
     agent_budget = 2.0 if len(nodes) <= 12 else (12.0 if prove_optimal else 8.0)
     agent_end = min(deadline - 1.0, time.monotonic() + agent_budget)
     if agent_end > time.monotonic() + 0.2:
-        proposed = propose_initial(
-            nodes,
+        joint = _joint_insertion(nodes, dataset, matrix, units_by_id, weights, scales, agent_end, fixed_nodes)
+        if joint is not None:
+            evaluated = _evaluate(joint, dataset, matrix, units_by_id, weights, scales)
+            if evaluated is not None:
+                _keep(joint, evaluated)
+    if constructed is not None and time.monotonic() < agent_end - 0.05:
+        improved = adaptive_improve(
+            constructed,
             dataset,
             matrix,
             units_by_id,
             weights,
             scales,
-            constructed,
             agent_end,
             seed,
             fixed_nodes,
         )
-        if proposed is not None and (best_score is None or proposed[3] < best_score - 1e-9):
-            constructed, best_routes, best_placements, best_score = proposed
+        if improved is not None:
+            improved_assignment, improved_routes, improved_placements, improved_score = improved
+            _keep(improved_assignment, (improved_routes, improved_placements, improved_score))
 
     hint = None
     if constructed is not None:
@@ -624,6 +664,63 @@ def solve_joint(
     large = len(nodes) > 12
     unknown_streak = 0
     idle_rounds = 0
+
+    def _model_pending() -> bool:
+        if model_thread is None:
+            return False
+        with model_lock:
+            return not model_box["done"]
+
+    def _hint_from(assignment: dict[str, list[CustomerNode]]) -> dict[str, list[str]] | None:
+        current = set(node_by_id)
+        hint_map = {vehicle.id: [] for vehicle in dataset.vehicles}
+        covered: list[str] = []
+        for vehicle_id, sequence in assignment.items():
+            if vehicle_id not in hint_map:
+                return None
+            ids = [node.node_id for node in sequence]
+            if any(node_id not in current for node_id in ids):
+                return None
+            hint_map[vehicle_id] = ids
+            covered.extend(ids)
+        if set(covered) != current:
+            return None
+        return hint_map
+
+    def _absorb_model() -> bool:
+        """If the parallel draft is ready and better, make it the incumbent."""
+        nonlocal proposal_note, proposal_accepted, hint, idle_rounds, unknown_streak, proven
+        if model_thread is None:
+            return False
+        with model_lock:
+            if not model_box["done"] or model_box["consumed"]:
+                return False
+            model_box["consumed"] = True
+            drafted = model_box["assignment"]
+            note = model_box["note"]
+        proposal_note = note
+        if drafted is None:
+            proposal_accepted = False
+            return False
+        evaluated = _evaluate(drafted, dataset, matrix, units_by_id, weights, scales)
+        if evaluated is None:
+            proposal_accepted = False
+            proposal_note = "模型初稿没有通过时间窗或装箱"
+            return False
+        if not _keep(drafted, evaluated):
+            proposal_accepted = False
+            proposal_note = f"{note}，但分数不如确定性搜索当前解"
+            return False
+        proposal_accepted = True
+        proposal_note = f"{note}，优于确定性搜索当前解"
+        refreshed = _hint_from(drafted)
+        if refreshed is not None:
+            hint = refreshed
+        idle_rounds = 0
+        unknown_streak = 0
+        if proven and lower_bound is not None and best_score is not None and best_score < lower_bound - BOUND_TOL:
+            proven = False
+        return True
 
     def _polish() -> bool:
         nonlocal best_score, best_routes, best_placements, hint
@@ -673,6 +770,7 @@ def solve_joint(
         master_slice = 12.0
     effective_workers = search_workers if search_workers > 1 else (8 if large else 1)
     while time.monotonic() < deadline and rounds < max_rounds:
+        _absorb_model()
         rounds += 1
         remaining = deadline - time.monotonic()
         if remaining < 0.2:
@@ -731,6 +829,8 @@ def solve_joint(
                     unknown_streak = 0
                     idle_rounds = 0
                 if not large or unknown_streak >= (6 if prove_optimal else 2):
+                    if large and (_model_pending() or _absorb_model()):
+                        continue
                     break
                 continue
         unknown_streak = 0
@@ -795,6 +895,8 @@ def solve_joint(
             if stalled and not large:
                 break
             if not prove_optimal and best_score is not None and idle_rounds >= (2 if large else 1):
+                if _absorb_model() or _model_pending():
+                    continue
                 break
             continue
         vehicle = next(item for item in dataset.vehicles if item.id == failed_vehicle)
@@ -833,13 +935,19 @@ def solve_joint(
         if rounds >= max_rounds:
             iteration_limit_reached = True
 
+    if model_thread is not None and _model_pending():
+        # The call itself stops at model_ready_by. Packing the draft takes a
+        # few more seconds, so wait past the clock before reading the verdict.
+        model_thread.join(timeout=max(0.0, model_ready_by - time.monotonic()) + 20.0)
+    _absorb_model()
+
     if best_routes is None or best_placements is None:
         return _failed(
             "packing_failed",
             "No packable route was found before the time limit",
             store_ids=sorted({node.store_id for node in nodes}),
         )
-    return _finish(
+    finished = _finish(
         best_routes,
         best_placements,
         dataset,
@@ -850,6 +958,11 @@ def solve_joint(
         lower_bound,
         rounds,
         iteration_limit_reached,
+    )
+    if proposal_note is None:
+        return finished
+    return finished.model_copy(
+        update={"model_proposal_accepted": proposal_accepted, "model_proposal_note": proposal_note}
     )
 
 
@@ -863,6 +976,7 @@ def replan(
     locked_vehicle_ids: list[str] | None = None,
     prove_optimal: bool = False,
     search_workers: int = 1,
+    model_proposal: bool = False,
 ) -> JointResult:
     """Keep locked vehicles unchanged and keep locked orders on their previous vehicles."""
     weights = weights or Weights()
@@ -874,6 +988,7 @@ def replan(
             time_limit_s=time_limit_s,
             prove_optimal=prove_optimal,
             search_workers=search_workers,
+            model_proposal=model_proposal,
         )
     frozen_ids = set(locked_vehicle_ids or [])
     frozen_routes = [route for route in previous.routes if route.vehicle_id in frozen_ids]
@@ -919,6 +1034,7 @@ def replan(
         fixed_nodes=fixed or None,
         prove_optimal=prove_optimal,
         search_workers=search_workers,
+        model_proposal=model_proposal,
     )
     if partial.status != "completed" or not frozen_routes:
         return partial

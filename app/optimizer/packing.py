@@ -9,6 +9,7 @@ Inside one stop, identical cartons stay together and fill a row of equal height.
 from __future__ import annotations
 
 import math
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from itertools import permutations
@@ -791,10 +792,12 @@ def _as_placement(vehicle: Vehicle, box: _Box) -> Placement:
 
 _PACK_CACHE: dict[tuple, PackResult] = {}
 _PACK_CACHE_LIMIT = 2048
+_PACK_LOCK = threading.Lock()
 
 
 def clear_pack_cache() -> None:
-    _PACK_CACHE.clear()
+    with _PACK_LOCK:
+        _PACK_CACHE.clear()
 
 
 def _pack_cache_key(vehicle: Vehicle, stops: list[PackStop], rule: LoadingRule) -> tuple:
@@ -835,13 +838,15 @@ def _pack_cache_key(vehicle: Vehicle, stops: list[PackStop], rule: LoadingRule) 
 
 def pack_stops(vehicle: Vehicle, stops: list[PackStop], rule: LoadingRule) -> PackResult:
     key = _pack_cache_key(vehicle, stops, rule)
-    cached = _PACK_CACHE.get(key)
+    with _PACK_LOCK:
+        cached = _PACK_CACHE.get(key)
     if cached is not None:
         return cached
     result = _pack_stops(vehicle, stops, rule)
-    if len(_PACK_CACHE) >= _PACK_CACHE_LIMIT:
-        _PACK_CACHE.clear()
-    _PACK_CACHE[key] = result
+    with _PACK_LOCK:
+        if len(_PACK_CACHE) >= _PACK_CACHE_LIMIT:
+            _PACK_CACHE.clear()
+        _PACK_CACHE[key] = result
     return result
 
 

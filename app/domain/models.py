@@ -250,3 +250,5 @@ class JointResult(BaseModel):
     error_message: str | None = None
     infeasible_stores: list[str] = Field(default_factory=list)
     failed_unit_ids: list[str] = Field(default_factory=list)
+    model_proposal_accepted: bool | None = None
+    model_proposal_note: str | None = None

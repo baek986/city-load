@@ -33,17 +33,3 @@ class CargoExceedsVehicleError(PlanError):
             "At least one package does not fit in any vehicle",
             unit_ids=unit_ids,
         )
-
-
-class InfeasibleRouteError(PlanError):
-    def __init__(self, store_ids: list[str], message: str = "No feasible route") -> None:
-        super().__init__("infeasible_route", message, store_ids=store_ids)
-
-
-class PackingFailedError(PlanError):
-    def __init__(self, unit_ids: list[str]) -> None:
-        super().__init__(
-            "packing_failed",
-            "No packable assignment remains for the failed packages",
-            unit_ids=unit_ids,
-        )

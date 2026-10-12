@@ -256,10 +256,10 @@ def custom_sku_catalogue() -> list[Sku]:
 
 
 def custom_store_catalogue() -> list[Location]:
-    """Stores the user can choose from, spread across the simulated road network."""
+    """Every store on the pharmacy-day road network."""
     base = pharmacy_day()
     catalogue: list[Location] = []
-    for index, store in enumerate(base.stores[:20]):
+    for index, store in enumerate(base.stores):
         catalogue.append(
             store.model_copy(
                 update={

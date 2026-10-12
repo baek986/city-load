@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自定义药箱选择</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --paper: #eef1f4;
+      --panel: #ffffff;
+      --blue: #2f6fed;
+    }
+    * { box-sizing: border-box; }
+    html { font-size: 18px; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      padding: 18px 28px 6px;
+      background: transparent;
+    }
+    a.back { color: var(--blue); text-decoration: none; font-weight: 650; font-size: 1rem; }
+    h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
+    main {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 10px 28px 0;
+    }
+    .panel { padding: 10px 0 6px; }
+    input[type="checkbox"] { accent-color: var(--blue); width: 18px; height: 18px; }
+    .fields { display: flex; flex-wrap: wrap; gap: 28px; margin-bottom: 16px; }
+    label.field { display: flex; align-items: center; gap: 10px; font-size: 1.05rem; color: #4b5563; }
+    input[type="number"], select {
+      font: inherit;
+      font-size: 1.05rem;
+      color: var(--ink);
+      background: white;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 8px 12px;
+    }
+    input[type="number"] { width: 96px; }
+    .add-row { display: flex; gap: 12px; }
+    select { flex: 1; min-width: 0; height: 48px; }
+    button {
+      font: inherit;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button.add {
+      background: var(--blue);
+      color: white;
+      border: 1px solid var(--blue);
+      padding: 0 22px;
+      font-size: 1.05rem;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    .error { color: #9f1239; margin: 8px 2px 0; min-height: 0; }
+    .error:empty { display: none; }
+    .board { flex: 1; min-height: 0; overflow: auto; padding: 18px 2px 20px; }
+    .stores {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .empty {
+      grid-column: 1 / -1;
+      color: var(--muted);
+      text-align: center;
+      padding: 48px 12px;
+    }
+    .store {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      padding: 16px 18px 14px;
+      min-width: 0;
+    }
+    .store-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+    .store-head h2 { margin: 0; font-size: 1.2rem; font-weight: 700; }
+    .meta { margin: 4px 0 0; color: #9ca3af; font-size: 0.92rem; }
+    button.close {
+      margin-left: auto;
+      width: 30px;
+      height: 30px;
+      border: 1px solid #e5e7eb;
+      border-radius: 50%;
+      background: white;
+      color: #9ca3af;
+      font-size: 1.15rem;
+      line-height: 1;
+      padding: 0;
+    }
+    .sku {
+      display: grid;
+      grid-template-columns: 18px 1fr auto 72px;
+      gap: 10px;
+      align-items: center;
+      font-size: 1rem;
+      padding: 6px 0;
+    }
+    .sku .times { color: #9ca3af; font-size: 1.05rem; }
+    .sku input[type="number"] { width: 72px; padding: 6px 8px; }
+    footer {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 28px;
+      background: #f8fafc;
+      border-top: 1px solid #e6e8eb;
+    }
+    footer .count { margin-right: 8px; color: #4b5563; font-size: 1.05rem; }
+    footer { justify-content: flex-end; }
+    button.ghost {
+      background: white;
+      color: #374151;
+      border: 1px solid #d1d5db;
+      padding: 10px 22px;
+      font-size: 1.05rem;
+    }
+    button.primary {
+      background: var(--blue);
+      color: white;
+      border: 1px solid var(--blue);
+      padding: 10px 24px;
+      font-size: 1.05rem;
+      font-weight: 650;
+    }
+    @media (max-width: 1100px) {
+      .stores { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .stores { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="back" href="/demo">← 返回方案列表</a>
+    <h1>自定义药箱选择</h1>
+  </header>
+  <main>
+    <section class="panel">
+      <div class="fields">
+        <label class="field">随机种子 <input id="seed" type="number" min="1" value="1"></label>
+        <label class="field">求解时限(秒) <input id="limit" type="number" min="5" value="30"></label>
+      </div>
+      <div class="add-row">
+        <select id="picker"></select>
+        <button class="add" id="add" type="button">+ 添加药店</button>
+      </div>
+      <p id="error" class="error"></p>
+    </section>
+    <div class="board">
+      <div id="stores" class="stores"></div>
+    </div>
+  </main>
+  <footer>
+    <span class="count" id="count">已选 0 家门店，0 种药箱</span>
+    <button class="ghost" id="clear" type="button">清空</button>
+    <button class="primary" id="submit" type="button">生成方案</button>
+  </footer>
+  <script>
+    var catalogue = null;
+    var picked = [];
+
+    function sizeText(sku) {
+      return sku.length_mm + "×" + sku.width_mm + "×" + sku.height_mm + "mm";
+    }
+
+    function refreshPicker() {
+      var select = document.getElementById("picker");
+      var used = {};
+      picked.forEach(function (id) { used[id] = true; });
+      var left = catalogue.stores.filter(function (store) { return !used[store.id]; });
+      select.innerHTML = "";
+      var placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "-- 选择要添加的药店 (" + left.length + " 家可选) --";
+      select.appendChild(placeholder);
+      left.forEach(function (store) {
+        var option = document.createElement("option");
+        option.value = store.id;
+        option.textContent = store.name + "  (" + Math.round(store.x_m) + ", " + Math.round(store.y_m) + ")";
+        select.appendChild(option);
+      });
+    }
+
+    function updateCount() {
+      var lines = 0;
+      document.querySelectorAll(".store .sku").forEach(function (row) {
+        var box = row.querySelector("input[type=checkbox]");
+        var qty = Number(row.querySelector("input[type=number]").value);
+        if (box.checked && qty > 0) lines += 1;
+      });
+      document.getElementById("count").textContent = "已选 " + picked.length + " 家门店，" + lines + " 种药箱";
+    }
+
+    function render() {
+      var saved = {};
+      document.querySelectorAll(".store").forEach(function (card) {
+        var lines = {};
+        card.querySelectorAll(".sku").forEach(function (row) {
+          lines[row.dataset.skuId] = {
+            checked: row.querySelector("input[type=checkbox]").checked,
+            qty: row.querySelector("input[type=number]").value
+          };
+        });
+        saved[card.dataset.storeId] = lines;
+      });
+      var host = document.getElementById("stores");
+      host.innerHTML = "";
+      if (!picked.length) {
+        host.innerHTML = '<div class="empty">从上方选择药店，再勾选要送的药箱。</div>';
+        updateCount();
+        return;
+      }
+      var byId = {};
+      catalogue.stores.forEach(function (store) { byId[store.id] = store; });
+      picked.forEach(function (storeId) {
+        var store = byId[storeId];
+        if (!store) return;
+        var card = document.createElement("section");
+        card.className = "store";
+        card.dataset.storeId = store.id;
+        var head = document.createElement("div");
+        head.className = "store-head";
+        var titles = document.createElement("div");
+        var name = document.createElement("h2");
+        name.textContent = store.name;
+        var meta = document.createElement("p");
+        meta.className = "meta";
+        meta.textContent = "ID: " + store.id + " · (" + Math.round(store.x_m) + ", " + Math.round(store.y_m) + ")";
+        titles.appendChild(name);
+        titles.appendChild(meta);
+        var close = document.createElement("button");
+        close.className = "close";
+        close.type = "button";
+        close.textContent = "×";
+        close.addEventListener("click", function () {
+          picked = picked.filter(function (id) { return id !== store.id; });
+          refreshPicker();
+          render();
+        });
+        head.appendChild(titles);
+        head.appendChild(close);
+        card.appendChild(head);
+        catalogue.skus.forEach(function (sku, index) {
+          var row = document.createElement("label");
+          row.className = "sku";
+          row.dataset.skuId = sku.id;
+          var previous = saved[store.id] && saved[store.id][sku.id];
+          var box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = previous ? previous.checked : index === 0;
+          box.addEventListener("change", updateCount);
+          var caption = document.createElement("span");
+          caption.textContent = sku.name + " (" + sizeText(sku) + ")";
+          var times = document.createElement("span");
+          times.className = "times";
+          times.textContent = "×";
+          var qty = document.createElement("input");
+          qty.type = "number";
+          qty.min = "1";
+          qty.value = previous && Number(previous.qty) > 0 ? previous.qty : "1";
+          qty.addEventListener("input", updateCount);
+          row.appendChild(box);
+          row.appendChild(caption);
+          row.appendChild(times);
+          row.appendChild(qty);
+          card.appendChild(row);
+        });
+        host.appendChild(card);
+      });
+      updateCount();
+    }
+
+    async function load() {
+      var response = await fetch("/v1/demo/catalog");
+      if (!response.ok) {
+        document.getElementById("error").textContent = "药箱目录加载失败";
+        return;
+      }
+      catalogue = await response.json();
+      refreshPicker();
+      render();
+    }
+
+    document.getElementById("add").addEventListener("click", function () {
+      var id = document.getElementById("picker").value;
+      if (!id || picked.indexOf(id) >= 0) return;
+      picked.push(id);
+      refreshPicker();
+      render();
+    });
+
+    document.getElementById("clear").addEventListener("click", function () {
+      picked = [];
+      document.getElementById("error").textContent = "";
+      refreshPicker();
+      render();
+    });
+
+    document.getElementById("submit").addEventListener("click", async function () {
+      var button = document.getElementById("submit");
+      var error = document.getElementById("error");
+      error.textContent = "";
+      var stores = [];
+      document.querySelectorAll(".store").forEach(function (card) {
+        var lines = [];
+        card.querySelectorAll(".sku").forEach(function (row) {
+          var box = row.querySelector("input[type=checkbox]");
+          var qty = Number(row.querySelector("input[type=number]").value);
+          if (box.checked && qty > 0) lines.push({ sku_id: row.dataset.skuId, qty: qty });
+        });
+        if (lines.length) stores.push({ store_id: card.dataset.storeId, lines: lines });
+      });
+      if (!stores.length) {
+        error.textContent = "请至少添加一个门店，并勾选药箱。";
+        return;
+      }
+      button.disabled = true;
+      try {
+        var response = await fetch("/v1/demo/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            custom: {
+              stores: stores,
+              seed: Number(document.getElementById("seed").value) || 1,
+              time_limit_s: Number(document.getElementById("limit").value) || 30
+            }
+          })
+        });
+        var body = await response.json();
+        if (!response.ok) {
+          var message = body.detail && body.detail.message ? body.detail.message : "创建任务失败";
+          throw new Error(message);
+        }
+        window.location.href = "/demo?task=" + encodeURIComponent(body.id);
+      } catch (exc) {
+        error.textContent = exc.message;
+        button.disabled = false;
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>
