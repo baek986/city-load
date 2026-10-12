@@ -3,8 +3,8 @@
 from fastapi.testclient import TestClient
 
 from app.api.main import create_app
-from app.demo.scenarios import preview_day
-from app.demo.view import build_scene
+from app.demo.scenarios import pharmacy_day, preview_day
+from app.demo.view import _map_bounds, build_scene
 from app.optimizer.joint import solve_joint
 
 
@@ -19,6 +19,9 @@ def test_demo_page_links_route_and_loading() -> None:
     assert "中心公园" in page.text
     assert 'id="map"' in page.text
     assert 'id="cargo"' in page.text
+    assert "看全图" in page.text
+    assert "看本车" in page.text
+    assert "滚轮缩放" in page.text
     home = client.get("/")
     assert home.status_code == 200
     assert 'href="/demo"' in home.text
@@ -26,6 +29,20 @@ def test_demo_page_links_route_and_loading() -> None:
     assert listed.status_code == 200
     ids = {item["id"] for item in listed.json()["scenarios"]}
     assert {"preview", "heavy", "pharmacy"} <= ids
+
+
+def test_pharmacy_map_bounds_cover_outer_stores() -> None:
+    dataset = pharmacy_day()
+    locations = [{"x_m": dataset.depot.x_m, "y_m": dataset.depot.y_m}] + [
+        {"x_m": store.x_m, "y_m": store.y_m} for store in dataset.stores
+    ]
+    bounds = _map_bounds(locations, [])
+    for location in locations:
+        assert bounds["min_x"] <= location["x_m"] <= bounds["max_x"]
+        assert bounds["min_y"] <= location["y_m"] <= bounds["max_y"]
+    xs = [location["x_m"] for location in locations]
+    ys = [location["y_m"] for location in locations]
+    assert min(xs) < -2400 or max(xs) > 4000 or min(ys) < -2800 or max(ys) > 3600
 
 
 def test_preview_scene_follows_the_streets() -> None:
@@ -36,6 +53,15 @@ def test_preview_scene_follows_the_streets() -> None:
     assert scene["summary"]["store_count"] == 3
     assert scene["routes"]
     assert scene["placements"]
+    bounds = scene["bounds"]
+    for location in scene["locations"]:
+        assert bounds["min_x"] <= location["x_m"] <= bounds["max_x"]
+        assert bounds["min_y"] <= location["y_m"] <= bounds["max_y"]
+    for route in scene["routes"]:
+        for leg in route["legs"]:
+            for x_m, y_m in leg["points"]:
+                assert bounds["min_x"] <= x_m <= bounds["max_x"]
+                assert bounds["min_y"] <= y_m <= bounds["max_y"]
     for route in scene["routes"]:
         assert route["stops"]
         for leg in route["legs"]:

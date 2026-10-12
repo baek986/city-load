@@ -7,6 +7,33 @@ from app.domain.models import Dataset, JointResult, Weights
 from app.network.roads import ARTERIAL_SPEED_MPS, BLOCK_M, LOCAL_SPEED_MPS, RoadNetwork
 from app.optimizer.scoring import build_scales, extra_handling, split_order_count
 
+def _map_bounds(locations: list, routes: list) -> dict:
+    """Fit the canvas to stores and every road vertex the routes actually use."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for location in locations:
+        xs.append(location["x_m"])
+        ys.append(location["y_m"])
+    for route in routes:
+        for stop in route.get("stops") or []:
+            xs.append(stop["x_m"])
+            ys.append(stop["y_m"])
+        for leg in route.get("legs") or []:
+            for x_m, y_m in leg.get("points") or []:
+                xs.append(x_m)
+                ys.append(y_m)
+    if not xs:
+        return {"min_x": -2400.0, "min_y": -2800.0, "max_x": 4000.0, "max_y": 3600.0}
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    pad = max(800.0, span * 0.08)
+    return {
+        "min_x": min(xs) - pad,
+        "min_y": min(ys) - pad,
+        "max_x": max(xs) + pad,
+        "max_y": max(ys) + pad,
+    }
+
+
 _COLORS = (
     "#b45309",
     "#0369a1",
@@ -127,6 +154,7 @@ def build_scene(dataset: Dataset, result: JointResult, scenario: dict) -> dict:
 
     return {
         "scenario": scenario,
+        "bounds": _map_bounds(locations, routes),
         "summary": {
             "proven_optimal": result.proven_optimal,
             "gap": result.gap,
