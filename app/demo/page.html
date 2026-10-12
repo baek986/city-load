@@ -51,21 +51,67 @@
       font-weight: 600;
     }
     button:disabled { opacity: 0.55; cursor: wait; }
-    #run { position: relative; }
-    #run .spinner {
-      display: none;
-      width: 14px; height: 14px;
-      border: 2px solid rgba(255,255,255,0.35);
-      border-top-color: white;
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-      vertical-align: -2px;
-      margin-left: 6px;
-    }
-    #run.loading .spinner { display: inline-block; }
-    @keyframes spin { to { transform: rotate(360deg); } }
     .status { padding: 8px 20px 0; min-height: 1.4rem; color: var(--muted); font-size: 0.9rem; }
     .status.error { color: #9f1239; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---- 方案列表视图 ---- */
+    #task-list-view { padding: 16px 20px 24px; }
+    .section-title { font-size: 1.05rem; font-weight: 650; margin: 16px 0 10px; }
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .task-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      position: relative;
+    }
+    .task-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(154,52,18,0.10); }
+    .task-card .tc-name { font-size: 0.98rem; font-weight: 650; margin-bottom: 4px; }
+    .task-card .tc-detail { font-size: 0.82rem; color: var(--muted); margin-bottom: 8px; }
+    .tc-badge {
+      display: inline-block;
+      font-size: 0.76rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .tc-badge.pending  { background: #fef3c7; color: #92400e; }
+    .tc-badge.running  { background: #dbeafe; color: #1e40af; }
+    .tc-badge.completed { background: #dcfce7; color: #14532d; }
+    .tc-badge.failed   { background: #fee2e2; color: #991b1b; }
+    .tc-card-spacer { color: var(--muted); font-size: 0.82rem; text-align: center; padding: 20px; }
+    .tc-delete {
+      position: absolute;
+      top: 8px; right: 8px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 1.1rem;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 6px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .task-card:hover .tc-delete { opacity: 1; }
+    .tc-delete:hover { background: #fee2e2; color: #991b1b; }
+    .tc-mini-spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: -1px;
+      margin-right: 4px;
+    }
     .overlay {
       position: absolute;
       inset: 0;
@@ -188,8 +234,7 @@
     }
     .panel .hint { margin: 2px 14px 0; color: var(--muted); font-size: 0.8rem; }
     canvas { width: 100%; height: 420px; display: block; touch-action: none; }
-    #map { background: #d7e8cc; cursor: grab; }
-    #map.is-panning { cursor: grabbing; }
+    #map { background: #d7e8cc; }
     #cargo { height: 500px; }
     .toolbar, .vehicles, .stops {
       display: flex;
@@ -236,60 +281,64 @@
   <header>
     <div>
       <h1>配送演示</h1>
-      <p>上面是模拟路网上的行车路线，下面是同一辆车的车厢。颜色按车辆区分，车厢里的颜色按门店区分。</p>
+      <p id="subtitle">选择一个方案开始查看路线和装载，或新建自定义方案。</p>
     </div>
     <div class="controls">
-      <label>场景
-        <select id="scenario"></select>
-      </label>
-      <button id="run" type="button">生成方案<span class="spinner"></span></button>
+      <button id="back-btn" type="button" style="display:none;">← 返回列表</button>
+      <button id="new-btn" type="button">+ 新建自定义方案</button>
     </div>
   </header>
-  <div id="status" class="status">选择场景后生成方案。3 店大约十几秒，30 店大约一分钟。</div>
-  <div id="optimality" class="optimality-line"></div>
-  <div id="stats" class="stats"></div>
-  <div id="breakdown" class="breakdown"></div>
-  <div class="workspace">
-    <div id="overlay" class="overlay">
-      <div class="ov-box">
-        <div class="ov-ring"></div>
-        <span id="ov-text">正在规划路线和装载…</span>
-      </div>
+
+  <!-- 方案列表视图 -->
+  <div id="task-list-view">
+    <div class="preset-section">
+      <h2 class="section-title">预设场景</h2>
+      <div id="preset-cards" class="card-grid"></div>
     </div>
-    <section class="panel">
-      <h2>路线</h2>
-      <p class="hint">滚轮缩放，拖动平移。选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。</p>
-      <div class="toolbar" id="map-tools">
-        <button class="view-btn" type="button" id="map-zoom-in">放大</button>
-        <button class="view-btn" type="button" id="map-zoom-out">缩小</button>
-        <button class="view-btn" type="button" id="map-fit-all">看全图</button>
-        <button class="view-btn" type="button" id="map-fit-route">看本车</button>
+    <div class="history-section">
+      <h2 class="section-title">历史方案</h2>
+      <div id="history-cards" class="card-grid"></div>
+    </div>
+  </div>
+
+  <!-- 方案详情视图 -->
+  <div id="scene-view" style="display:none;">
+    <div id="status" class="status"></div>
+    <div id="optimality" class="optimality-line"></div>
+    <div id="stats" class="stats"></div>
+    <div id="breakdown" class="breakdown"></div>
+    <div class="workspace">
+      <div id="overlay" class="overlay">
+        <div class="ov-box">
+          <div class="ov-ring"></div>
+          <span id="ov-text">正在后台规划路线和装载…</span>
+        </div>
       </div>
-      <canvas id="map"></canvas>
-      <div id="vehicles" class="vehicles"></div>
-    </section>
-    <section class="panel">
-      <h2>装载</h2>
-      <p class="hint" id="cargo-hint">车门在近处。先卸的货靠近车门，后送的货在深处。斜线是易碎箱。</p>
-      <canvas id="cargo"></canvas>
-      <div class="toolbar">
-        <button class="view-btn active" type="button" data-view="iso">轴测</button>
-        <button class="view-btn" type="button" data-view="top">俯视</button>
-        <button class="view-btn" type="button" data-view="side">侧视</button>
-      </div>
-      <div class="slider">
-        <span id="progress-label">整车</span>
-        <input id="progress" type="range" min="0" value="0" disabled>
-      </div>
-      <div id="stops" class="stops"></div>
-    </section>
+      <section class="panel">
+        <h2>路线</h2>
+        <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。</p>
+        <canvas id="map"></canvas>
+        <div id="vehicles" class="vehicles"></div>
+      </section>
+      <section class="panel">
+        <h2>装载</h2>
+        <p class="hint" id="cargo-hint">车门在近处。先卸的货靠近车门，后送的货在深处。斜线是易碎箱。</p>
+        <canvas id="cargo"></canvas>
+        <div class="toolbar">
+          <button class="view-btn active" type="button" data-view="iso">轴测</button>
+          <button class="view-btn" type="button" data-view="top">俯视</button>
+          <button class="view-btn" type="button" data-view="side">侧视</button>
+        </div>
+        <div class="slider">
+          <span id="progress-label">整车</span>
+          <input id="progress" type="range" min="0" value="0" disabled>
+        </div>
+        <div id="stops" class="stops"></div>
+      </section>
+    </div>
   </div>
   <div id="tip"></div>
   <script>
-    const MAP_ZOOM_MIN = 0.6;
-    const MAP_ZOOM_MAX = 16;
-    const MAP_PAD = 28;
-
     const state = {
       scenarios: [],
       scene: null,
@@ -297,8 +346,10 @@
       view: "iso",
       unloaded: 0,
       mapHits: [],
-      mapFocus: "all",
-      mapCam: { zoom: 1, panX: 0, panY: 0 }
+      tasks: [],
+      currentTaskId: null,
+      pollTimer: null,
+      listTimer: null
     };
 
     const mapCanvas = document.getElementById("map");
@@ -314,118 +365,6 @@
 
     function km(meters) {
       return (meters / 1000).toFixed(1) + " km";
-    }
-
-    function mapExtent(scene) {
-      const fallback = { minX: -2400, minY: -2800, maxX: 4000, maxY: 3600 };
-      if (!scene) return fallback;
-      if (scene.bounds) {
-        return {
-          minX: scene.bounds.min_x,
-          minY: scene.bounds.min_y,
-          maxX: scene.bounds.max_x,
-          maxY: scene.bounds.max_y
-        };
-      }
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      function include(x, y) {
-        if (x == null || y == null) return;
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-      }
-      (scene.locations || []).forEach(function (location) { include(location.x_m, location.y_m); });
-      (scene.routes || []).forEach(function (route) {
-        (route.stops || []).forEach(function (stop) { include(stop.x_m, stop.y_m); });
-        (route.legs || []).forEach(function (leg) {
-          (leg.points || []).forEach(function (point) { include(point[0], point[1]); });
-        });
-      });
-      if (!isFinite(minX) || minX === maxX || minY === maxY) return fallback;
-      const padM = Math.max(800, Math.max(maxX - minX, maxY - minY) * 0.08);
-      return { minX: minX - padM, minY: minY - padM, maxX: maxX + padM, maxY: maxY + padM };
-    }
-
-    function paddedExtent(minX, minY, maxX, maxY, ratio) {
-      if (!isFinite(minX) || minX === maxX || minY === maxY) return mapExtent(state.scene);
-      const padM = Math.max(800, Math.max(maxX - minX, maxY - minY) * (ratio || 0.12));
-      return { minX: minX - padM, minY: minY - padM, maxX: maxX + padM, maxY: maxY + padM };
-    }
-
-    function extentFromRoute(route) {
-      if (!route) return mapExtent(state.scene);
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      function include(x, y) {
-        if (x == null || y == null) return;
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-      }
-      (route.stops || []).forEach(function (stop) { include(stop.x_m, stop.y_m); });
-      (route.legs || []).forEach(function (leg) {
-        (leg.points || []).forEach(function (point) { include(point[0], point[1]); });
-      });
-      return paddedExtent(minX, minY, maxX, maxY, 0.14);
-    }
-
-    function activeMapExtent() {
-      if (state.mapFocus === "route") return extentFromRoute(selectedRoute());
-      return mapExtent(state.scene);
-    }
-
-    function resetMapCamera(focus) {
-      state.mapFocus = focus || "all";
-      state.mapCam = { zoom: 1, panX: 0, panY: 0 };
-    }
-
-    function mapProjection(view) {
-      const extent = activeMapExtent();
-      const spanX = Math.max(extent.maxX - extent.minX, 1);
-      const spanY = Math.max(extent.maxY - extent.minY, 1);
-      const base = Math.min((view.width - MAP_PAD * 2) / spanX, (view.height - MAP_PAD * 2) / spanY);
-      const scale = base * state.mapCam.zoom;
-      const originX = MAP_PAD + ((view.width - MAP_PAD * 2) - spanX * scale) / 2 + state.mapCam.panX;
-      const originY = MAP_PAD + ((view.height - MAP_PAD * 2) - spanY * scale) / 2 + state.mapCam.panY;
-      return {
-        extent: extent,
-        spanX: spanX,
-        spanY: spanY,
-        base: base,
-        scale: scale,
-        originX: originX,
-        originY: originY,
-        view: view
-      };
-    }
-
-    function screenToWorld(sx, sy, cam) {
-      return {
-        x: cam.extent.minX + (sx - cam.originX) / cam.scale,
-        y: cam.extent.maxY - (sy - cam.originY) / cam.scale
-      };
-    }
-
-    function zoomMapAt(sx, sy, factor) {
-      const rect = mapCanvas.getBoundingClientRect();
-      const cam = mapProjection({ width: rect.width, height: rect.height });
-      const world = screenToWorld(sx, sy, cam);
-      const zoom = Math.max(MAP_ZOOM_MIN, Math.min(MAP_ZOOM_MAX, state.mapCam.zoom * factor));
-      state.mapCam.zoom = zoom;
-      const afterScale = cam.base * zoom;
-      const originX = sx - (world.x - cam.extent.minX) * afterScale;
-      const originY = sy - (cam.extent.maxY - world.y) * afterScale;
-      const fitOriginX = MAP_PAD + ((rect.width - MAP_PAD * 2) - cam.spanX * afterScale) / 2;
-      const fitOriginY = MAP_PAD + ((rect.height - MAP_PAD * 2) - cam.spanY * afterScale) / 2;
-      state.mapCam.panX = originX - fitOriginX;
-      state.mapCam.panY = originY - fitOriginY;
-      drawMap();
-    }
-
-    function zoomMapCenter(factor) {
-      const rect = mapCanvas.getBoundingClientRect();
-      zoomMapAt(rect.width / 2, rect.height / 2, factor);
     }
 
     function minutes(seconds) {
@@ -509,11 +448,11 @@
         arterial_every: 4
       };
       const locations = state.scene ? state.scene.locations : [];
-      const cam = mapProjection(view);
-      const minX = cam.extent.minX, minY = cam.extent.minY, maxX = cam.extent.maxX, maxY = cam.extent.maxY;
-      const scale = cam.scale;
-      const originX = cam.originX;
-      const originY = cam.originY;
+      let minX = -2400, minY = -2800, maxX = 4000, maxY = 3600;
+      const pad = 18;
+      const scale = Math.min((view.width - pad * 2) / (maxX - minX), (view.height - pad * 2) / (maxY - minY));
+      const originX = pad + ((view.width - pad * 2) - (maxX - minX) * scale) / 2;
+      const originY = pad + ((view.height - pad * 2) - (maxY - minY) * scale) / 2;
       function project(x, y) {
         return [originX + (x - minX) * scale, originY + (maxY - y) * scale];
       }
@@ -1159,14 +1098,8 @@
       context.stroke();
       let meters = 2000;
       let barPx = meters * scale;
-      while (barPx > 120 && meters > 50) {
-        meters = meters / 2;
-        barPx = meters * scale;
-      }
-      while (barPx < 46) {
-        meters = meters * 2;
-        barPx = meters * scale;
-      }
+      if (barPx > 120) { meters = 1000; barPx = meters * scale; }
+      if (barPx < 46) { meters = 5000; barPx = meters * scale; }
       const barLabel = meters >= 1000 ? (meters / 1000) + " km" : meters + " m";
       context.strokeStyle = "#1c1917";
       context.lineWidth = 2;
@@ -1513,7 +1446,7 @@
       });
     });
 
-    function showMapTip(event) {
+    mapCanvas.addEventListener("mousemove", function (event) {
       const rect = mapCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
@@ -1536,102 +1469,82 @@
       if (location.kind === "place") tip.textContent = location.name + " · " + location.category;
       else if (location.kind === "depot") tip.textContent = location.name + " · 仓库";
       else tip.textContent = location.name + (location.window_open_s != null ? "  " + clock(location.window_open_s) + "–" + clock(location.window_close_s) : "");
+    });
+    mapCanvas.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+
+    // ------------------------------------------------------------------
+    // 方案列表与后台任务轮询
+    // ------------------------------------------------------------------
+
+    function showListView() {
+      document.getElementById("task-list-view").style.display = "";
+      document.getElementById("scene-view").style.display = "none";
+      document.getElementById("back-btn").style.display = "none";
+      document.getElementById("new-btn").style.display = "";
+      document.getElementById("subtitle").textContent = "选择一个方案开始查看路线和装载，或新建自定义方案。";
+      if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+      // 重建预设卡片，恢复初始状态
+      renderPresetCards();
+      // 刷新历史任务列表
+      loadTasks();
+      // 启动列表轮询（当有 pending/running 任务时持续刷新）
+      startListPolling();
     }
 
-    let mapDrag = null;
-    mapCanvas.addEventListener("pointerdown", function (event) {
-      if (event.button !== 0) return;
-      mapDrag = {
-        x: event.clientX,
-        y: event.clientY,
-        panX: state.mapCam.panX,
-        panY: state.mapCam.panY,
-        moved: false
-      };
-      mapCanvas.classList.add("is-panning");
-      mapCanvas.setPointerCapture(event.pointerId);
-      tip.style.display = "none";
-    });
-    mapCanvas.addEventListener("pointermove", function (event) {
-      if (!mapDrag) {
-        showMapTip(event);
-        return;
-      }
-      const dx = event.clientX - mapDrag.x;
-      const dy = event.clientY - mapDrag.y;
-      if (Math.hypot(dx, dy) > 3) mapDrag.moved = true;
-      state.mapCam.panX = mapDrag.panX + dx;
-      state.mapCam.panY = mapDrag.panY + dy;
-      drawMap();
-    });
-    function endMapDrag(event) {
-      if (!mapDrag) return;
-      mapCanvas.classList.remove("is-panning");
-      if (mapCanvas.hasPointerCapture(event.pointerId)) mapCanvas.releasePointerCapture(event.pointerId);
-      mapDrag = null;
+    function showSceneView(taskId) {
+      document.getElementById("task-list-view").style.display = "none";
+      document.getElementById("scene-view").style.display = "";
+      document.getElementById("back-btn").style.display = "";
+      document.getElementById("new-btn").style.display = "none";
+      if (state.listTimer) { clearInterval(state.listTimer); state.listTimer = null; }
+      state.currentTaskId = taskId;
+      pollTask(taskId);
     }
-    mapCanvas.addEventListener("pointerup", endMapDrag);
-    mapCanvas.addEventListener("pointercancel", endMapDrag);
-    mapCanvas.addEventListener("mouseleave", function () {
-      if (!mapDrag) tip.style.display = "none";
-    });
-    mapCanvas.addEventListener("wheel", function (event) {
-      event.preventDefault();
-      const rect = mapCanvas.getBoundingClientRect();
-      const factor = event.deltaY < 0 ? 1.18 : 1 / 1.18;
-      zoomMapAt(event.clientX - rect.left, event.clientY - rect.top, factor);
-    }, { passive: false });
-    mapCanvas.addEventListener("dblclick", function (event) {
-      event.preventDefault();
-      const rect = mapCanvas.getBoundingClientRect();
-      zoomMapAt(event.clientX - rect.left, event.clientY - rect.top, 1.6);
-    });
-
-    document.getElementById("map-zoom-in").addEventListener("click", function () { zoomMapCenter(1.3); });
-    document.getElementById("map-zoom-out").addEventListener("click", function () { zoomMapCenter(1 / 1.3); });
-    document.getElementById("map-fit-all").addEventListener("click", function () {
-      resetMapCamera("all");
-      drawMap();
-    });
-    document.getElementById("map-fit-route").addEventListener("click", function () {
-      resetMapCamera(selectedRoute() ? "route" : "all");
-      drawMap();
-    });
 
     async function loadScenarios() {
-      const response = await fetch("/v1/demo/scenarios");
-      const body = await response.json();
-      state.scenarios = body.scenarios;
-      const select = document.getElementById("scenario");
-      body.scenarios.forEach(function (scenario) {
-        const option = document.createElement("option");
-        option.value = scenario.id;
-        option.textContent = scenario.name;
-        if (scenario.id === "heavy") option.selected = true;
-        select.appendChild(option);
-      });
-      select.addEventListener("change", function () {
-        const chosen = state.scenarios.find(function (item) { return item.id === select.value; });
-        if (chosen && !state.scene) {
-          document.getElementById("status").textContent = chosen.detail;
-        }
+      try {
+        const response = await fetch("/v1/demo/scenarios");
+        const body = await response.json();
+        state.scenarios = body.scenarios;
+        renderPresetCards();
+      } catch (e) {
+        document.getElementById("preset-cards").innerHTML =
+          '<div class="tc-card-spacer">场景列表加载失败</div>';
+      }
+    }
+
+    function renderPresetCards() {
+      var host = document.getElementById("preset-cards");
+      host.innerHTML = "";
+      state.scenarios.forEach(function (scenario) {
+        var card = document.createElement("div");
+        card.className = "task-card";
+        var name = document.createElement("div");
+        name.className = "tc-name";
+        name.textContent = scenario.name;
+        var detail = document.createElement("div");
+        detail.className = "tc-detail";
+        detail.textContent = scenario.detail;
+        var badge = document.createElement("span");
+        badge.className = "tc-badge pending";
+        badge.textContent = "点击生成";
+        card.appendChild(name);
+        card.appendChild(detail);
+        card.appendChild(badge);
+        card.addEventListener("click", function () {
+          createPresetTask(scenario);
+        });
+        host.appendChild(card);
       });
     }
 
-    document.getElementById("run").addEventListener("click", async function () {
-      const button = document.getElementById("run");
-      const status = document.getElementById("status");
-      const select = document.getElementById("scenario");
-      const overlay = document.getElementById("overlay");
-      const scenario = state.scenarios.find(function (item) { return item.id === select.value; });
-      button.disabled = true;
-      button.classList.add("loading");
-      overlay.classList.add("active");
-      status.className = "status";
-      status.textContent = "正在一起规划路线和装载…";
-      const started = performance.now();
+    async function createPresetTask(scenario) {
+      var card = event.currentTarget;
+      var badge = card.querySelector(".tc-badge");
+      badge.className = "tc-badge running";
+      badge.innerHTML = '<span class="tc-mini-spinner"></span>提交中…';
       try {
-        const response = await fetch("/v1/demo/solve", {
+        var response = await fetch("/v1/demo/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1640,35 +1553,180 @@
             time_limit_s: scenario.time_limit_s
           })
         });
-        const body = await response.json();
+        var body = await response.json();
         if (!response.ok) {
-          const detail = body.detail && body.detail.message ? body.detail.message : "规划没有得到可行方案";
-          throw new Error(detail);
+          throw new Error(body.detail && body.detail.message ? body.detail.message : "创建任务失败");
         }
-        state.scene = body;
-        state.vehicleId = body.routes.length ? body.routes[0].vehicle_id : null;
-        state.unloaded = 0;
-        resetMapCamera("all");
-        const seconds = ((performance.now() - started) / 1000).toFixed(1);
-        status.textContent = body.scenario.name + " 已生成，用时 " + seconds + " 秒。点击车辆可以切换路线和车厢。";
-        renderStats();
-        renderVehicles();
-        renderStops();
-        draw();
+        showSceneView(body.id);
       } catch (error) {
-        status.className = "status error";
-        status.textContent = error.message;
-      } finally {
-        button.disabled = false;
-        button.classList.remove("loading");
-        overlay.classList.remove("active");
+        badge.className = "tc-badge failed";
+        badge.textContent = error.message;
       }
+    }
+
+    async function loadTasks() {
+      try {
+        var response = await fetch("/v1/demo/tasks");
+        var body = await response.json();
+        state.tasks = body.tasks;
+        renderHistoryCards();
+      } catch (e) {
+        renderHistoryCards();
+      }
+    }
+
+    function renderHistoryCards() {
+      var host = document.getElementById("history-cards");
+      host.innerHTML = "";
+      if (!state.tasks || state.tasks.length === 0) {
+        host.innerHTML = '<div class="tc-card-spacer">还没有生成过方案，点击上方预设场景或在右上角新建自定义方案。</div>';
+        return;
+      }
+      state.tasks.forEach(function (task) {
+        var card = document.createElement("div");
+        card.className = "task-card";
+        var name = document.createElement("div");
+        name.className = "tc-name";
+        name.textContent = task.name;
+        var detail = document.createElement("div");
+        detail.className = "tc-detail";
+        detail.textContent = task.detail;
+        var badge = document.createElement("span");
+        badge.className = "tc-badge " + task.status;
+        var labelMap = { pending: "排队中", running: "计算中", completed: "已完成", failed: "失败" };
+        if (task.status === "pending" || task.status === "running") {
+          badge.innerHTML = '<span class="tc-mini-spinner"></span>' + (labelMap[task.status] || task.status);
+        } else {
+          badge.textContent = labelMap[task.status] || task.status;
+        }
+        card.appendChild(name);
+        card.appendChild(detail);
+        card.appendChild(badge);
+        card.addEventListener("click", function () {
+          showSceneView(task.id);
+        });
+        // 删除按钮
+        var del = document.createElement("button");
+        del.className = "tc-delete";
+        del.textContent = "×";
+        del.title = "删除";
+        del.addEventListener("click", function (e) {
+          e.stopPropagation();
+          deleteTask(task.id);
+        });
+        card.appendChild(del);
+        host.appendChild(card);
+      });
+    }
+
+    async function deleteTask(taskId) {
+      try {
+        await fetch("/v1/demo/tasks/" + taskId, { method: "DELETE" });
+        loadTasks();
+      } catch (e) { /* ignore */ }
+    }
+
+    function startListPolling() {
+      if (state.listTimer) clearInterval(state.listTimer);
+      state.listTimer = setInterval(function () {
+        var hasActive = state.tasks.some(function (t) {
+          return t.status === "pending" || t.status === "running";
+        });
+        loadTasks();
+        if (!hasActive) {
+          // 再刷新一次确保拿到最终状态，然后停止
+          setTimeout(function () {
+            loadTasks();
+          }, 1500);
+        }
+      }, 2000);
+    }
+
+    function pollTask(taskId) {
+      if (state.pollTimer) clearInterval(state.pollTimer);
+      var status = document.getElementById("status");
+      var overlay = document.getElementById("overlay");
+      var ovText = document.getElementById("ov-text");
+
+      async function fetchOnce() {
+        try {
+          var response = await fetch("/v1/demo/tasks/" + taskId);
+          if (!response.ok) {
+            var errBody = await response.json();
+            throw new Error(errBody.detail && errBody.detail.message ? errBody.detail.message : "任务不存在");
+          }
+          var body = await response.json();
+          if (body.status === "completed" && body.scene) {
+            if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+            overlay.classList.remove("active");
+            state.scene = body.scene;
+            state.vehicleId = body.scene.routes.length ? body.scene.routes[0].vehicle_id : null;
+            state.unloaded = 0;
+            status.className = "status";
+            status.textContent = body.scene.scenario.name + " 已生成。点击车辆可以切换路线和车厢。";
+            renderStats();
+            renderVehicles();
+            renderStops();
+            draw();
+          } else if (body.status === "failed") {
+            if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+            overlay.classList.remove("active");
+            status.className = "status error";
+            status.textContent = body.error || "规划失败，未能生成可行方案。";
+          } else {
+            // pending or running
+            overlay.classList.add("active");
+            ovText.textContent = body.status === "pending" ? "排队中，请稍候…" : "正在后台规划路线和装载…";
+            status.className = "status";
+            status.textContent = body.status === "pending" ? "任务排队中…" : "后台正在规划路线和装载…";
+          }
+        } catch (error) {
+          if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+          overlay.classList.remove("active");
+          status.className = "status error";
+          status.textContent = error.message;
+        }
+      }
+
+      fetchOnce();
+      state.pollTimer = setInterval(fetchOnce, 2000);
+    }
+
+    // ------------------------------------------------------------------
+    // 按钮事件
+    // ------------------------------------------------------------------
+
+    document.getElementById("new-btn").addEventListener("click", function () {
+      window.location.href = "/custom";
     });
 
-    window.addEventListener("resize", draw);
-    loadScenarios().then(draw).catch(function () {
-      document.getElementById("status").textContent = "场景列表读取失败。";
+    document.getElementById("back-btn").addEventListener("click", function () {
+      // 清除 URL 中的 task 参数
+      if (window.location.search) {
+        window.history.replaceState({}, "", "/demo");
+      }
+      state.scene = null;
+      showListView();
     });
+
+    // ------------------------------------------------------------------
+    // 初始化
+    // ------------------------------------------------------------------
+
+    window.addEventListener("resize", draw);
+
+    (function init() {
+      // 检查 URL 参数 ?task=xxx
+      var params = new URLSearchParams(window.location.search);
+      var taskId = params.get("task");
+      loadScenarios();
+      if (taskId) {
+        showSceneView(taskId);
+      } else {
+        showListView();
+      }
+      draw();
+    })();
   </script>
 </body>
 </html>

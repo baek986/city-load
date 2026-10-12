@@ -218,3 +218,171 @@ def load_scenario(scenario_id: str) -> Dataset:
     if scenario_id == "pharmacy":
         return pharmacy_day()
     raise KeyError(scenario_id)
+
+
+# ---------------------------------------------------------------------------
+# Custom scenario: user picks stores and SKU lines from a catalogue.
+# ---------------------------------------------------------------------------
+
+_CUSTOM_SKUS = (
+    (520, 400, 380, 6_000, False, True, False, "普通药箱A"),
+    (480, 360, 300, 4_000, True, True, False, "易碎药箱B"),
+    (600, 400, 500, 10_000, False, True, False, "大箱C"),
+    (400, 300, 280, 3_500, False, False, True, "正放药箱D"),
+    (450, 350, 320, 5_000, False, True, False, "标准药箱E"),
+    (900, 600, 480, 14_000, False, True, False, "批发大箱F"),
+)
+
+
+def custom_sku_catalogue() -> list[Sku]:
+    """SKUs the user can choose from in the custom scenario."""
+    skus: list[Sku] = []
+    for index, (length, width, height, weight, fragile, stackable, upright, name) in enumerate(_CUSTOM_SKUS):
+        skus.append(
+            Sku(
+                id=f"custom-sku-{index + 1:02d}",
+                name=name,
+                length_mm=length,
+                width_mm=width,
+                height_mm=height,
+                weight_g=weight,
+                fragile=fragile,
+                stackable=stackable,
+                upright_only=upright,
+                max_stack_load_g=0 if fragile or upright else 80_000,
+            )
+        )
+    return skus
+
+
+def custom_store_catalogue() -> list[Location]:
+    """Stores the user can choose from, spread across the simulated road network."""
+    base = pharmacy_day()
+    catalogue: list[Location] = []
+    for index, store in enumerate(base.stores[:20]):
+        catalogue.append(
+            store.model_copy(
+                update={
+                    "id": f"custom-store-{index + 1:02d}",
+                    "name": f"药店{index + 1:02d}",
+                }
+            )
+        )
+    return catalogue
+
+
+def custom_vehicles() -> list[Vehicle]:
+    return [
+        Vehicle(
+            id="van-1",
+            type_name="van",
+            length_mm=3200,
+            width_mm=1700,
+            height_mm=1700,
+            max_weight_g=1_500_000,
+            cost_per_km=4.5,
+            fixed_cost=80,
+        ),
+        Vehicle(
+            id="truck-1",
+            type_name="truck",
+            length_mm=4200,
+            width_mm=2100,
+            height_mm=2000,
+            max_weight_g=3_000_000,
+            cost_per_km=6.0,
+            fixed_cost=120,
+        ),
+        Vehicle(
+            id="truck-2",
+            type_name="truck",
+            length_mm=4200,
+            width_mm=2100,
+            height_mm=2000,
+            max_weight_g=3_000_000,
+            cost_per_km=6.0,
+            fixed_cost=120,
+        ),
+    ]
+
+
+def custom_catalogue() -> dict:
+    """Return the full catalogue for the frontend: SKUs, stores, and vehicles."""
+    skus = custom_sku_catalogue()
+    stores = custom_store_catalogue()
+    vehicles = custom_vehicles()
+    return {
+        "skus": [item.model_dump() for item in skus],
+        "stores": [item.model_dump() for item in stores],
+        "vehicles": [item.model_dump() for item in vehicles],
+    }
+
+
+def custom_day(
+    store_picks: list[dict],
+) -> Dataset:
+    """Build a Dataset from user-selected stores and SKU lines.
+
+    Each item in *store_picks* has ``store_id`` and ``lines`` (list of
+    ``{sku_id, qty}``).
+    """
+    all_skus = {sku.id: sku for sku in custom_sku_catalogue()}
+    all_stores = {store.id: store for store in custom_store_catalogue()}
+
+    network = RoadNetwork()
+    depot_point = network.snap(0, 0)
+    depot = Location(
+        id="depot",
+        name="中心仓",
+        kind="depot",
+        x_m=depot_point.x_m,
+        y_m=depot_point.y_m,
+        window_open_s=6 * 3600,
+        window_close_s=22 * 3600,
+    )
+
+    stores: list[Location] = []
+    orders: list[Order] = []
+    used_sku_ids: set[str] = set()
+
+    for pick in store_picks:
+        store_id = pick["store_id"]
+        lines_data = pick.get("lines", [])
+        if not lines_data:
+            continue
+        store_template = all_stores.get(store_id)
+        if store_template is None:
+            continue
+        stores.append(store_template)
+        order_lines: list[OrderLine] = []
+        for line_index, line in enumerate(lines_data):
+            sku_id = line["sku_id"]
+            qty = line.get("qty", 1)
+            if sku_id not in all_skus or qty < 1:
+                continue
+            used_sku_ids.add(sku_id)
+            order_lines.append(
+                OrderLine(id=f"custom-line-{store_id}-{line_index}", sku_id=sku_id, qty=qty)
+            )
+        if order_lines:
+            orders.append(
+                Order(
+                    id=f"custom-order-{store_id}",
+                    store_id=store_id,
+                    service_date="2026-10-12",
+                    lines=order_lines,
+                )
+            )
+
+    skus = [all_skus[sku_id] for sku_id in sorted(used_sku_ids)]
+    vehicles = custom_vehicles()
+
+    points = [(depot.id, depot.x_m, depot.y_m), *[(s.id, s.x_m, s.y_m) for s in stores]]
+    return Dataset(
+        depot=depot,
+        stores=stores,
+        skus=skus,
+        orders=orders,
+        vehicles=vehicles,
+        arcs=network.travel_arcs(points),
+    )

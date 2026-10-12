@@ -28,3 +28,34 @@ class ReplanCreate(BaseModel):
     seed: int | None = None
     time_limit_s: float = 180.0
     prove_optimal: bool = False
+
+
+class CustomSelection(BaseModel):
+    """One SKU line chosen by the user: which SKU and how many per store."""
+
+    sku_id: str
+    qty: int = 1
+
+
+class CustomStorePick(BaseModel):
+    """A store the user selected, with the SKU lines to deliver."""
+
+    store_id: str
+    lines: list[CustomSelection] = Field(default_factory=list)
+
+
+class CustomSolve(BaseModel):
+    """Solve a custom day built from user-selected stores and SKU lines."""
+
+    stores: list[CustomStorePick]
+    seed: int = 1
+    time_limit_s: float = 30.0
+
+
+class TaskCreate(BaseModel):
+    """Create a background solve task for a preset or custom scenario."""
+
+    scenario: str = "heavy"
+    seed: int | None = None
+    time_limit_s: float | None = None
+    custom: CustomSolve | None = None
