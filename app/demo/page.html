@@ -374,7 +374,7 @@
       </div>
       <section class="panel">
         <h2>路线</h2>
-        <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道。滚轮缩放，拖动平移，双击恢复。</p>
+        <p class="hint">选中车辆的路线画在路侧，白箭头是行驶方向。其他车辆的路线会淡下去。黄色是主干道，小路会拐弯。河上有北、中、南三座桥，公园里没有穿行的路。滚轮缩放，拖动平移，双击恢复。</p>
         <canvas id="map"></canvas>
         <div id="vehicles" class="vehicles"></div>
       </section>
@@ -515,6 +515,13 @@
         half_blocks: 32,
         river_x_m: 600,
         bridge_y_m: 0,
+        bridges_y_m: [0, 3200, -3200],
+        parks: [
+          { i: -4, j: -1, w: 2, h: 2 },
+          { i: 8, j: 10, w: 2, h: 2 },
+          { i: -8, j: 12, w: 2, h: 2 },
+          { i: 8, j: -8, w: 2, h: 2 }
+        ],
         arterial_every: 4
       };
       const locations = state.scene ? state.scene.locations : [];
@@ -555,10 +562,69 @@
         return true;
       }
 
+      const bridgeRows = new Set((network.bridges_y_m || [0, 3200, -3200]).map(function (y) {
+        return Math.round(y / block);
+      }));
+
+      function ctrl(seed, k, amp) {
+        let n = (Math.imul(seed, 374761393) + Math.imul(k, 668265263)) >>> 0;
+        n = Math.imul(n ^ (n >>> 13), 1274126177) >>> 0;
+        return (n % (2 * amp + 1)) - amp;
+      }
+
+      function along(seed, t, amp) {
+        const span = 4;
+        const cell = Math.floor(t / span);
+        const frac = t - cell * span;
+        const a = ctrl(seed, cell, amp);
+        const b = ctrl(seed, cell + 1, amp);
+        return Math.floor((a * (span - frac) + b * frac) / span);
+      }
+
+      function nodeXy(i, j) {
+        let x = i * block;
+        let y = j * block;
+        if (i === 0 && j === 0) return [0, 0];
+        if (i !== 1 && i !== 2) x += along(10000 + i, j, i % 4 === 0 ? 36 : 96);
+        if (!bridgeRows.has(j)) y += along(80000 + j, i, j % 4 === 0 ? 36 : 96);
+        return [x, y];
+      }
+
+      function projectNode(i, j) {
+        const xy = nodeXy(i, j);
+        return project(xy[0], xy[1]);
+      }
+
+      function fillLand(i, j) {
+        const corners = [projectNode(i, j), projectNode(i + 1, j), projectNode(i + 1, j + 1), projectNode(i, j + 1)];
+        context.beginPath();
+        context.moveTo(corners[0][0], corners[0][1]);
+        context.lineTo(corners[1][0], corners[1][1]);
+        context.lineTo(corners[2][0], corners[2][1]);
+        context.lineTo(corners[3][0], corners[3][1]);
+        context.closePath();
+        context.fill();
+      }
+
       function cellRect(i, j, wCells, hCells) {
-        const topLeft = project(i * block, (j + hCells) * block);
-        const bottomRight = project((i + wCells) * block, j * block);
-        return { x: topLeft[0], y: topLeft[1], w: bottomRight[0] - topLeft[0], h: bottomRight[1] - topLeft[1] };
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (let di = 0; di <= wCells; di += 1) {
+          for (let dj = 0; dj <= hCells; dj += 1) {
+            const corner = projectNode(i + di, j + dj);
+            minX = Math.min(minX, corner[0]);
+            maxX = Math.max(maxX, corner[0]);
+            minY = Math.min(minY, corner[1]);
+            maxY = Math.max(maxY, corner[1]);
+          }
+        }
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const w = (maxX - minX) * 0.62;
+        const h = (maxY - minY) * 0.62;
+        return { x: cx - w / 2, y: cy - h / 2, w: w, h: h };
       }
 
       function roundRect(x, y, w, h, r) {
@@ -612,8 +678,7 @@
           const park = mix(i, j) % 13 === 0;
           if (park) {
             context.fillStyle = "#b7d39a";
-            roundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, 2);
-            context.fill();
+            fillLand(i, j);
             if (blockPx >= 16) {
               const seed = mix(i, j);
               for (let tree = 0; tree < 3; tree += 1) {
@@ -628,7 +693,7 @@
             continue;
           }
           context.fillStyle = "rgb(" + (236 + (mix(i, j) % 10)) + "," + (230 + (mix(j, i) % 8)) + ",220)";
-          context.fillRect(rect.x, rect.y, rect.w, rect.h);
+          fillLand(i, j);
           if (blockPx < 8) continue;
           const seed = mix(i, j);
           const inset = Math.max(1, roadPx(true) * 0.42);
@@ -653,6 +718,10 @@
       }
 
       function drawPlace(place) {
+        context.fillStyle = place.kind === "park" || place.kind === "stadium" ? "#9fcf78" : "#f4efe6";
+        for (let di = 0; di < place.w; di += 1) {
+          for (let dj = 0; dj < place.h; dj += 1) fillLand(place.i + di, place.j + dj);
+        }
         const rect = cellRect(place.i, place.j, place.w, place.h);
         if (rect.x > view.width || rect.y > view.height || rect.x + rect.w < 0 || rect.y + rect.h < 0) return;
         const detail = Math.min(rect.w, rect.h) >= 26;
@@ -767,11 +836,19 @@
       context.fillRect(water0[0], 0, water1[0] - water0[0], view.height);
       context.strokeStyle = "rgba(255,255,255,0.45)";
       context.lineWidth = 1;
-      const bridgeTop = project(0, network.bridge_y_m + 70)[1];
-      const bridgeBottom = project(0, network.bridge_y_m - 70)[1];
+      const bridgeYs = network.bridges_y_m || [network.bridge_y_m];
+      const parks = network.parks || [];
+      function nearBridge(screenY) {
+        for (let index = 0; index < bridgeYs.length; index += 1) {
+          const top = project(0, bridgeYs[index] + 70)[1];
+          const bottom = project(0, bridgeYs[index] - 70)[1];
+          if (screenY > Math.min(top, bottom) - 8 && screenY < Math.max(top, bottom) + 8) return true;
+        }
+        return false;
+      }
       for (let band = 0; band < 7; band += 1) {
         const y = 24 + band * (view.height / 7);
-        if (y > Math.min(bridgeTop, bridgeBottom) - 8 && y < Math.max(bridgeTop, bridgeBottom) + 8) continue;
+        if (nearBridge(y)) continue;
         context.beginPath();
         context.moveTo(water0[0] + 6, y);
         context.lineTo(water0[0] + (water1[0] - water0[0]) * 0.42, y);
@@ -780,7 +857,7 @@
 
       function strokeRoad(x1, y1, x2, y2, arterial) {
         const width = roadPx(arterial);
-        context.lineCap = "butt";
+        context.lineCap = "round";
         context.strokeStyle = arterial ? "#e4c15a" : "#d5cdc0";
         context.lineWidth = width + (arterial ? 1.5 : 1);
         context.beginPath();
@@ -795,54 +872,86 @@
         context.stroke();
       }
 
-      const gridTop = project(0, Math.min(limit, viewMaxY))[1];
-      const gridBottom = project(0, Math.max(-limit, viewMinY))[1];
-      const gridLeft = project(Math.max(-limit, viewMinX), 0)[0];
-      const gridRight = project(Math.min(limit, viewMaxX), 0)[0];
-      const riverScreenL = project(riverLeft, 0)[0];
-      const riverScreenR = project(riverRight, 0)[0];
-      for (let i = Math.ceil(Math.max(-limit, viewMinX) / block); i <= Math.floor(Math.min(limit, viewMaxX) / block); i += 1) {
-        const x = project(i * block, 0)[0];
-        strokeRoad(x, gridTop, x, gridBottom, i % network.arterial_every === 0);
+      function throughFootprint(footprints, i1, j1, i2, j2) {
+        for (let index = 0; index < footprints.length; index += 1) {
+          const place = footprints[index];
+          if (i1 === i2) {
+            const j = Math.min(j1, j2);
+            if (place.i < i1 && i1 < place.i + place.w && place.j <= j && j < place.j + place.h) return true;
+          } else {
+            const i = Math.min(i1, i2);
+            if (place.j < j1 && j1 < place.j + place.h && place.i <= i && i < place.i + place.w) return true;
+          }
+        }
+        return false;
       }
-      for (let j = Math.ceil(Math.max(-limit, viewMinY) / block); j <= Math.floor(Math.min(limit, viewMaxY) / block); j += 1) {
-        const y = project(0, j * block)[1];
+
+      function throughPark(i1, j1, i2, j2) {
+        return throughFootprint(parks, i1, j1, i2, j2) || throughFootprint(PLACES, i1, j1, i2, j2);
+      }
+
+      function riverBlocked(i1, j1, i2, j2) {
+        if (j1 !== j2) return false;
+        const crosses = (i1 < riverI && i2 >= riverI) || (i2 < riverI && i1 >= riverI);
+        if (!crosses) return false;
+        return bridgeYs.indexOf(j1 * block) < 0;
+      }
+
+      const cellMinI = Math.max(-network.half_blocks, Math.floor(Math.max(-limit, viewMinX) / block) - 1);
+      const cellMaxI = Math.min(network.half_blocks, Math.ceil(Math.min(limit, viewMaxX) / block) + 1);
+      const cellMinJ = Math.max(-network.half_blocks, Math.floor(Math.max(-limit, viewMinY) / block) - 1);
+      const cellMaxJ = Math.min(network.half_blocks, Math.ceil(Math.min(limit, viewMaxY) / block) + 1);
+      for (let j = cellMinJ; j <= cellMaxJ; j += 1) {
         const arterial = j % network.arterial_every === 0;
-        if (j * block === network.bridge_y_m) strokeRoad(gridLeft, y, gridRight, y, true);
-        else {
-          strokeRoad(gridLeft, y, riverScreenL, y, arterial);
-          strokeRoad(riverScreenR, y, gridRight, y, arterial);
+        for (let i = cellMinI; i < cellMaxI; i += 1) {
+          if (throughPark(i, j, i + 1, j) || riverBlocked(i, j, i + 1, j)) continue;
+          const from = projectNode(i, j);
+          const to = projectNode(i + 1, j);
+          strokeRoad(from[0], from[1], to[0], to[1], arterial);
+        }
+      }
+      for (let i = cellMinI; i <= cellMaxI; i += 1) {
+        const arterial = i % network.arterial_every === 0;
+        for (let j = cellMinJ; j < cellMaxJ; j += 1) {
+          if (throughPark(i, j, i, j + 1)) continue;
+          const from = projectNode(i, j);
+          const to = projectNode(i, j + 1);
+          strokeRoad(from[0], from[1], to[0], to[1], arterial);
         }
       }
 
-      const deckTop = project(riverLeft - 20, network.bridge_y_m + 36);
-      const deckBottom = project(riverRight + 20, network.bridge_y_m - 36);
-      let deckX = deckTop[0];
-      let deckY = deckTop[1];
-      let deckW = deckBottom[0] - deckTop[0];
-      let deckH = deckBottom[1] - deckTop[1];
-      if (deckH < 10) {
-        const mid = deckY + deckH / 2;
-        deckY = mid - 5;
-        deckH = 10;
-      }
-      context.fillStyle = "rgba(36, 64, 82, 0.28)";
-      context.fillRect(deckX, deckY + 3, deckW, deckH);
-      const deck = context.createLinearGradient(deckX, deckY, deckX, deckY + deckH);
-      deck.addColorStop(0, "#f7f4ee");
-      deck.addColorStop(0.2, "#d9d2c6");
-      deck.addColorStop(0.5, "#cfc6b8");
-      deck.addColorStop(1, "#b7aea0");
-      context.fillStyle = deck;
-      context.fillRect(deckX, deckY, deckW, deckH);
-      context.strokeStyle = "#6f675e";
-      context.lineWidth = 1.2;
-      context.beginPath();
-      context.moveTo(deckX, deckY + 1.2);
-      context.lineTo(deckX + deckW, deckY + 1.2);
-      context.moveTo(deckX, deckY + deckH - 1.2);
-      context.lineTo(deckX + deckW, deckY + deckH - 1.2);
-      context.stroke();
+      const bridgeDecks = [];
+      bridgeYs.forEach(function (bridgeY) {
+        const deckTop = project(riverLeft - 20, bridgeY + 36);
+        const deckBottom = project(riverRight + 20, bridgeY - 36);
+        let deckX = deckTop[0];
+        let deckY = deckTop[1];
+        let deckW = deckBottom[0] - deckTop[0];
+        let deckH = deckBottom[1] - deckTop[1];
+        if (deckH < 10) {
+          const mid = deckY + deckH / 2;
+          deckY = mid - 5;
+          deckH = 10;
+        }
+        context.fillStyle = "rgba(36, 64, 82, 0.28)";
+        context.fillRect(deckX, deckY + 3, deckW, deckH);
+        const deck = context.createLinearGradient(deckX, deckY, deckX, deckY + deckH);
+        deck.addColorStop(0, "#f7f4ee");
+        deck.addColorStop(0.2, "#d9d2c6");
+        deck.addColorStop(0.5, "#cfc6b8");
+        deck.addColorStop(1, "#b7aea0");
+        context.fillStyle = deck;
+        context.fillRect(deckX, deckY, deckW, deckH);
+        context.strokeStyle = "#6f675e";
+        context.lineWidth = 1.2;
+        context.beginPath();
+        context.moveTo(deckX, deckY + 1.2);
+        context.lineTo(deckX + deckW, deckY + 1.2);
+        context.moveTo(deckX, deckY + deckH - 1.2);
+        context.lineTo(deckX + deckW, deckY + deckH - 1.2);
+        context.stroke();
+        bridgeDecks.push({ y: bridgeY, x: deckX + deckW / 2 });
+      });
 
       function screenRoute(route, shift) {
         const raw = [];
@@ -945,12 +1054,14 @@
       context.textBaseline = "middle";
       context.font = "700 13px " + font;
       const roadY = project(0, network.bridge_y_m)[1];
-      const bridgeLabelW = context.measureText("清河桥").width + 8;
-      const bridgeLabelX = deckX + deckW / 2;
-      const bridgeLabelY = roadY - 22;
-      if (claim(bridgeLabelX - bridgeLabelW / 2, bridgeLabelY - 8, bridgeLabelW, 16)) {
-        halo("清河桥", bridgeLabelX, bridgeLabelY, "#3f3a34", 13, "700");
-      }
+      bridgeDecks.forEach(function (item) {
+        const label = item.y === network.bridge_y_m ? "清河桥" : (item.y > 0 ? "北桥" : "南桥");
+        const bridgeLabelW = context.measureText(label).width + 8;
+        const bridgeLabelY = project(0, item.y)[1] - 22;
+        if (claim(item.x - bridgeLabelW / 2, bridgeLabelY - 8, bridgeLabelW, 16)) {
+          halo(label, item.x, bridgeLabelY, "#3f3a34", 13, "700");
+        }
+      });
       const riverLabelX = (water0[0] + water1[0]) / 2;
       const riverLabelY = roadY - 100;
       if (riverLabelY > 24 && riverLabelY < view.height - 24) {

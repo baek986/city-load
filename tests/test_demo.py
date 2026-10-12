@@ -1,5 +1,7 @@
 """The demo page and the geometry returned for a short road trip."""
 
+import math
+
 from fastapi.testclient import TestClient
 
 from app.api.main import create_app
@@ -67,7 +69,8 @@ def test_preview_scene_follows_the_streets() -> None:
         for leg in route["legs"]:
             points = leg["points"]
             length = sum(
-                abs(right[0] - left[0]) + abs(right[1] - left[1]) for left, right in zip(points, points[1:])
+                int(round(math.hypot(right[0] - left[0], right[1] - left[1])))
+                for left, right in zip(points, points[1:])
             )
             assert length == leg["distance_m"]
             assert len(points) >= 2

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.domain.matrix import TravelMatrix
 from app.domain.models import Dataset, JointResult, Weights
-from app.network.roads import ARTERIAL_SPEED_MPS, BLOCK_M, LOCAL_SPEED_MPS, RoadNetwork
+from app.network.roads import ARTERIAL_SPEED_MPS, BLOCK_M, BRIDGES_J, LOCAL_SPEED_MPS, PARKS, RoadNetwork
 from app.optimizer.scoring import build_scales, extra_handling, split_order_count
 
 def _map_bounds(locations: list, routes: list) -> dict:
@@ -176,6 +176,8 @@ def build_scene(dataset: Dataset, result: JointResult, scenario: dict) -> dict:
             "half_blocks": network.half_blocks,
             "river_x_m": int(1.5 * BLOCK_M),
             "bridge_y_m": 0,
+            "bridges_y_m": [j * BLOCK_M for j in BRIDGES_J],
+            "parks": [{"i": i, "j": j, "w": w, "h": h} for i, j, w, h in PARKS],
             "arterial_every": 4,
             "local_speed_mps": LOCAL_SPEED_MPS,
             "arterial_speed_mps": ARTERIAL_SPEED_MPS,
